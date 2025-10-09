@@ -1,0 +1,21 @@
+defaults:
+  - base_video
+
+save_dir: data/dl3dv
+external_cond_dim: 0
+max_frames: 8
+frame_skip: 10
+context_length: 4
+resolution: 64
+data_mean: [[[0.5]], [[0.5]], [[0.5]]]
+data_std: [[[0.5]], [[0.5]], [[0.5]]]
+filter_min_len: null
+num_eval_videos: 1024
+subdataset_size: null
+maximize_training_data: false
+augmentation:
+  frame_skip_increase: 0
+  horizontal_flip_prob: 0.0
+  reverse_prob: 0.0
+  back_and_forth_prob: 0.0
+
