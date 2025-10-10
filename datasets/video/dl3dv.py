@@ -234,11 +234,33 @@ class DL3DVAdvancedVideoDataset(DL3DVBaseVideoDataset, BaseAdvancedVideoDataset)
             cam_fp = cam_dir / f"frame_{i+1:05d}.npz"
             if not cam_fp.exists():
                 raise FileNotFoundError(f"Expected cam file not found: {cam_fp}")
-            pose = np.load(cam_fp)["pose"]
-            cams.append(torch.as_tensor(pose, dtype=torch.float32))
+            cam_data = np.load(cam_fp)
+            
+            # Extract intrinsics (fx, fy, cx, cy) and extrinsics (3x4 matrix)
+            if "intrinsics" in cam_data:
+                # If intrinsics are available, use them
+                intrinsics = cam_data["intrinsics"]  # Should be (fx, fy, cx, cy)
+                pose = cam_data["pose"]  # 4x4 matrix
+            else:
+                # Fallback: assume default intrinsics based on resolution
+                # This is a reasonable default for DL3DV dataset
+                resolution = getattr(self.cfg, "resolution", 256)
+                fx = fy = resolution * 0.7  # Reasonable focal length
+                cx = cy = resolution / 2.0  # Center of image
+                intrinsics = np.array([fx, fy, cx, cy], dtype=np.float32)
+                pose = cam_data["pose"]  # 4x4 matrix
+            
+            # Extract 3x4 extrinsic matrix from 4x4 pose matrix
+            extrinsic_3x4 = pose[:3, :]  # Take first 3 rows (3x4)
+            
+            # Combine intrinsics and extrinsics: [fx, fy, cx, cy] + [3x4 extrinsic flattened]
+            cond_vector = np.concatenate([
+                intrinsics,  # 4 elements
+                extrinsic_3x4.flatten()  # 12 elements
+            ])
+            cams.append(torch.as_tensor(cond_vector, dtype=torch.float32))
 
-        cams_tensor = torch.stack(cams, dim=0)  # (T, 4, 4)
-        cams_tensor = cams_tensor.reshape(T, -1)
+        cams_tensor = torch.stack(cams, dim=0)  # (T, 16)
         assert cams_tensor.shape[-1] == 16, f"cams_tensor last dim must be 16, got {cams_tensor.shape}"
         return cams_tensor
 

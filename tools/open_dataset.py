@@ -200,8 +200,20 @@ def save_first_batches(
         frustum_path = out_path / f"batch_{batch_idx:03d}_frustums.png"
         conds = batch["conds"]
         Bc, Tc, Dc = conds.shape
-        assert Dc == 16, "conds last dim must be 16 to form 4x4 mats"
-        mats = conds.reshape(Bc, Tc, 4, 4)
+        assert Dc == 16, "conds last dim must be 16 (fx,fy,cx,cy + 3x4 extrinsic)"
+        
+        # Extract intrinsics (first 4) and extrinsics (last 12)
+        intrinsics = conds[:, :, :4]  # (B, T, 4) - fx, fy, cx, cy
+        extrinsics_flat = conds[:, :, 4:]  # (B, T, 12) - flattened 3x4 matrix
+        
+        # Reshape extrinsics to 3x4 and pad to 4x4 for visualization
+        extrinsics_3x4 = extrinsics_flat.reshape(Bc, Tc, 3, 4)  # (B, T, 3, 4)
+        
+        # Create 4x4 matrices by adding the bottom row [0, 0, 0, 1]
+        mats = torch.zeros(Bc, Tc, 4, 4, dtype=conds.dtype, device=conds.device)
+        mats[:, :, :3, :] = extrinsics_3x4  # Copy 3x4 extrinsic matrix
+        mats[:, :, 3, 3] = 1.0  # Set bottom-right element to 1
+        
         save_pose_frustums(mats, frustum_path)
 
 
