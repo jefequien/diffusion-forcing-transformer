@@ -5,6 +5,7 @@ from omegaconf import DictConfig
 from PIL import Image
 import numpy as np
 from pathlib import Path
+import pandas as pd
 
 from .base_video import (
     BaseVideoDataset,
@@ -41,49 +42,69 @@ class DL3DVBaseVideoDataset(BaseVideoDataset):
 
     def build_metadata(self, split: SPLIT) -> None:
         """
-        Build metadata by scanning `save_dir/processed_dl3dv_ours`.
-        Expected per-sequence layout: `{...}/{hash}/dense/rgb/frame_XXXXX.png` and camera
-        data under `{shard}/{hash}/cam`.
+        Build metadata by reading `save_dir/processed_dl3dv_ours/metadata.csv` and
+        selecting shards by split:
+          - training: 1K, 2K, 3K, 4K, 5K
+          - validation: 6K
+          - test: 7K
 
-        Shard directories like `1K`, `2K`, ... are not resolutions; they are groupings
-        where each shard contains approximately N=1000, 2000, ... videos respectively.
-        If a split subfolder exists (e.g., `processed_dl3dv_ours/training`), only scan that;
-        otherwise scan all shard directories under `processed_dl3dv_ours`.
+        Each CSV row should contain (at least) a relative path under
+        `processed_dl3dv_ours` to a sequence directory `{shard}/{hash}`. We will
+        derive the RGB directory `{shard}/{hash}/dense/rgb` and count frames.
         """
         root = self.save_dir / "processed_dl3dv_ours"
-        split_root = root / split
-        scan_root = split_root if split_root.exists() else root
+        csv_path = root / "metadata.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"DL3DV metadata CSV not found: {csv_path}")
 
-        if not scan_root.exists():
-            raise FileNotFoundError(
-                f"DL3DV root not found: {scan_root}. Expected data under processed_dl3dv_ours."
-            )
+        split_to_shards = {
+            "training": {"1K", "2K", "3K", "4K", "5K"},
+            "validation": {"6K"},
+            "test": {"7K"},
+        }
+        allowed_shards = split_to_shards.get(split, set())
 
         video_paths: List[Path] = []
         video_pts: List[torch.Tensor] = []
         video_fps: List[float] = []
+        n_frames_list: List[int] = []
 
-        # iterate through all sequences under any shard directory (e.g., 1K, 2K, ...)
-        for shard_dir in sorted([p for p in scan_root.iterdir() if p.is_dir()]):
-            for seq_dir in sorted([p for p in shard_dir.iterdir() if p.is_dir()]):
-                rgb_dir = seq_dir / "dense" / "rgb"
-                if not rgb_dir.exists():
-                    raise FileNotFoundError(
-                        f"DL3DV rgb directory not found: {rgb_dir}. Expected data under {seq_dir}."
-                    )
-                frames = sorted(rgb_dir.glob("*.png"))
-                if len(frames) == 0:
-                    raise FileNotFoundError(
-                        f"DL3DV frames not found: {frames}. Expected data under {rgb_dir}."
-                    )
-                video_paths.append(rgb_dir)
-                video_pts.append(torch.arange(len(frames), dtype=torch.long))
-                video_fps.append(30.0)
+        # Read CSV with pandas and use n_frames directly
+        df = pd.read_csv(csv_path)
+        required_cols = {"image_rel_path", "fps", "n_frames"}
+        if not required_cols.issubset(df.columns):
+            raise ValueError(f"metadata.csv missing required columns: {required_cols} not in {set(df.columns)}")
+
+        # Filter rows by shard
+        df = df.copy()
+        df["shard"] = df["image_rel_path"].apply(lambda p: str(p).split("/")[0])
+        df = df[df["shard"].isin(allowed_shards)]
+
+        for _, row in df.iterrows():
+            rel_image_path = str(row["image_rel_path"]).strip()
+            if not pd.notna(row["fps"]):
+                raise ValueError(f"Missing fps for sequence {rel_image_path} in metadata.csv")
+            fps_val = float(row["fps"])  # no fallback
+            if not pd.notna(row["n_frames"]):
+                raise ValueError(f"Missing n_frames for sequence {rel_image_path} in metadata.csv")
+            n_frames_val = int(row["n_frames"])  # no fallback
+            if n_frames_val <= 0:
+                continue
+            rgb_dir = root / rel_image_path
+            # Do not glob frames; trust n_frames from CSV
+            video_paths.append(rgb_dir)
+            video_pts.append(torch.arange(n_frames_val, dtype=torch.long))
+            video_fps.append(fps_val)
+            n_frames_list.append(n_frames_val)
+
+        if len(video_paths) == 0:
+            raise RuntimeError(f"No sequences found for split {split} using CSV {csv_path}")
 
         metadata: Dict[str, Any] = {
             "video_paths": video_paths,
             "video_pts": video_pts,
             "video_fps": video_fps,
+            "n_frames": n_frames_list,
         }
         self.metadata_dir.mkdir(exist_ok=True, parents=True)
         torch.save(metadata, self.metadata_dir / f"{split}.pt")
@@ -115,13 +136,14 @@ class DL3DVBaseVideoDataset(BaseVideoDataset):
         Returns float tensor in [0, 1] with shape (T, C, H, W).
         """
         rgb_dir: Path = video_metadata["video_paths"]
-        frame_files = sorted(rgb_dir.glob("*.png"))
+        # Do not glob; construct file paths using 1-based zero-padded indexing
         if end_frame is None:
-            end_frame = len(frame_files)
-        frame_files = frame_files[start_frame:end_frame]
-
+            end_frame = self.video_length(video_metadata)
         frames: List[torch.Tensor] = []
-        for fp in frame_files:
+        for i in range(start_frame, end_frame):
+            fp = rgb_dir / f"frame_{i+1:05d}.png"
+            if not fp.exists():
+                raise FileNotFoundError(f"Missing RGB frame: {fp}")
             img = Image.open(fp).convert("RGB")
             arr = np.array(img, dtype=np.uint8)
             tensor = torch.from_numpy(arr).float() / 255.0  # (H, W, C)
@@ -186,33 +208,43 @@ class DL3DVAdvancedVideoDataset(DL3DVBaseVideoDataset, BaseAdvancedVideoDataset)
         if not cam_dir.exists():
             raise FileNotFoundError(f"DL3DV cam directory not found: {cam_dir}")
 
-        frame_files = sorted(rgb_dir.glob("*.png"))
-        sel_frames = frame_files[start_frame:end_frame]
-        if len(sel_frames) != T:
-            raise ValueError(f"Selected RGB frames ({len(sel_frames)}) != T ({T})")
-
+        # Do not glob; construct cam file paths in lockstep with frames
         cams: List[torch.Tensor] = []
-        for rgb_fp in sel_frames:
-            stem = rgb_fp.stem  # e.g., frame_00001
-            parts = stem.split("_")
-            if len(parts) < 2:
-                raise ValueError(f"Unexpected RGB filename: {rgb_fp.name}")
-            frame_id = parts[-1]
-            cam_fp = cam_dir / f"frame_{frame_id}.npz"
+        for i in range(start_frame, end_frame):
+            cam_fp = cam_dir / f"frame_{i+1:05d}.npz"
             if not cam_fp.exists():
                 raise FileNotFoundError(f"Expected cam file not found: {cam_fp}")
-            npz = np.load(cam_fp)
-            arrays = [np.asarray(npz[k]).reshape(-1) for k in sorted(npz.files)]
-            vec = np.concatenate(arrays, axis=0) if len(arrays) > 0 else np.empty((0,), dtype=np.float32)
-            cams.append(torch.as_tensor(vec, dtype=torch.float32))
+            pose = np.load(cam_fp)["pose"]
+            cams.append(torch.as_tensor(pose, dtype=torch.float32))
 
-        cams_tensor = torch.stack(cams, dim=0)
-        # Pad/truncate to external_cond_dim
-        current_D = cams_tensor.shape[-1]
-        if current_D < D:
-            cams_tensor = torch.nn.functional.pad(cams_tensor, (0, D - current_D))
-        elif current_D > D:
-            cams_tensor = cams_tensor[:, :D]
+        cams_tensor = torch.stack(cams, dim=0)  # (T, 4, 4)
+        cams_tensor = cams_tensor.reshape(T, -1)
+        assert cams_tensor.shape[-1] == 16, f"cams_tensor last dim must be 16, got {cams_tensor.shape}"
         return cams_tensor
+
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        if self.split != "training":
+            return super().__getitem__(idx)
+
+        video_idx, start_frame = self.get_clip_location(idx)
+        video_metadata = self.metadata[video_idx]
+        video_length = self.video_length(video_metadata)
+        frame_skip = (video_length - start_frame - 1) // (self.cfg.max_frames - 1)
+        # For DL3DV, clamp by configured frame_skip during training
+        frame_skip = min(frame_skip, self.frame_skip)
+
+        assert frame_skip > 0, f"Frame skip {frame_skip} should be greater than 0"
+        end_frame = start_frame + (self.cfg.max_frames - 1) * frame_skip + 1
+
+        video, cond = self.load_video_and_cond(video_metadata, start_frame, end_frame)
+        assert len(video) == len(cond), "Video and cond have different lengths"
+
+        video, cond = video[::frame_skip], cond[::frame_skip]
+        return {
+            "videos": self.transform(video),
+            "conds": cond,
+            "nonterminal": torch.ones(self.cfg.max_frames, dtype=torch.bool),
+        }
 
 

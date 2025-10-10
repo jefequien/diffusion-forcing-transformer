@@ -4,7 +4,7 @@ defaults:
 save_dir: data/dl3dv
 external_cond_dim: 16
 max_frames: 8
-frame_skip: 10
+frame_skip: 5
 context_length: 4
 resolution: 256
 resolution_width: 512

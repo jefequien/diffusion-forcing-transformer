@@ -6,9 +6,13 @@ from omegaconf import DictConfig, OmegaConf
 import torch
 from torch.utils.data import DataLoader
 from PIL import Image
+import io
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from vis.pose_viz import (
+    save_pose_frustums,
+)
 
 from datasets.video.realestate10k import RealEstate10KAdvancedVideoDataset
 from datasets.video.dl3dv import DL3DVAdvancedVideoDataset
@@ -131,50 +135,6 @@ def _batch_videos_to_gif_frames(videos: torch.Tensor) -> list[Image.Image]:
     return frames
 
 
-def _pca_3d(traj: torch.Tensor) -> "tuple[np.ndarray, np.ndarray]":
-    """
-    Simple PCA to 3D for a (T, D) tensor. Returns (proj(T,3), mean(D)).
-    """
-    x = traj.detach().cpu().float()
-    x = x - x.mean(dim=0, keepdim=True)
-    # (D, D) covariance via SVD on (T, D)
-    u, s, v = torch.pca_lowrank(x, q=min(3, x.shape[1])) if hasattr(torch, "pca_lowrank") else (None, None, None)
-    if v is None:
-        # fallback using SVD
-        # x = U S V^T, components are V[:,:3]
-        _, _, v_full = torch.linalg.svd(x, full_matrices=False)
-        v = v_full[:, : min(3, v_full.shape[1])]
-    proj = x @ v[:, : min(3, v.shape[1])]
-    proj_np = proj.cpu().numpy()
-    mean_np = traj.mean(dim=0).cpu().numpy()
-    if proj_np.shape[1] == 1:
-        proj_np = np.concatenate([proj_np, np.zeros_like(proj_np), np.zeros_like(proj_np)], axis=1)
-    elif proj_np.shape[1] == 2:
-        proj_np = np.concatenate([proj_np, np.zeros((proj_np.shape[0], 1))], axis=1)
-    return proj_np, mean_np
-
-
-def _save_pose_plot(conds: torch.Tensor, out_path: Path, title: str = "") -> None:
-    """
-    Visualize pose-like trajectories from a (T, D) tensor using 3D PCA embedding.
-    """
-    if conds is None or conds.numel() == 0:
-        return
-    if conds.ndim == 3:
-        # pick the first sample
-        conds = conds[0]
-    proj3d, _ = _pca_3d(conds)
-    fig = plt.figure(figsize=(4, 3))
-    ax = fig.add_subplot(111, projection="3d")
-    ax.plot(proj3d[:, 0], proj3d[:, 1], proj3d[:, 2], marker="o", markersize=2, linewidth=1)
-    ax.set_title(title)
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
-    ax.set_zlabel("PC3")
-    fig.tight_layout()
-    fig.savefig(out_path)
-    plt.close(fig)
-
 
 def save_first_batches(
     output_dir: str,
@@ -206,8 +166,8 @@ def save_first_batches(
     for batch_idx, batch in enumerate(dl):
         if batch_idx >= num_batches:
             break
-        if "videos" not in batch:
-            continue
+
+        assert "videos" in batch
         videos = batch["videos"]  # (B, T, C, H, W)
         print(f"Saving {videos.shape[0]} videos from batch {batch_idx} with shape {videos.shape}")
         assert videos.ndim == 5, "Expected videos of shape (B, T, C, H, W)"
@@ -236,10 +196,13 @@ def save_first_batches(
             )
 
         # Save pose visualization; raise if poses not found
-        if "conds" not in batch or batch["conds"] is None or (hasattr(batch["conds"], "numel") and batch["conds"].numel() == 0):
-            raise RuntimeError("Pose conditioning `conds` not found or empty in batch. Ensure external_cond_dim > 0 and data provides poses.")
-        pose_path = out_path / f"batch_{batch_idx:03d}_poses.png"
-        _save_pose_plot(batch["conds"], pose_path, title=f"batch {batch_idx} poses")
+        assert "conds" in batch
+        frustum_path = out_path / f"batch_{batch_idx:03d}_frustums.png"
+        conds = batch["conds"]
+        Bc, Tc, Dc = conds.shape
+        assert Dc == 16, "conds last dim must be 16 to form 4x4 mats"
+        mats = conds.reshape(Bc, Tc, 4, 4)
+        save_pose_frustums(mats, frustum_path)
 
 
 def _build_argparser() -> argparse.ArgumentParser:
