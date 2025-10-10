@@ -224,8 +224,10 @@ def _build_argparser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     args = _build_argparser().parse_args()
+    output_dir = f"outputs/open_dataset/{args.dataset}/{args.split}"
+    
     save_first_batches(
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         split=args.split,
         batch_size=args.batch_size,
         num_batches=args.num_batches,

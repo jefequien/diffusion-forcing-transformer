@@ -10,8 +10,6 @@
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=jhh57@cam.ac.uk
 
-# set -xe
-
 hostname
 nvidia-smi --list-gpus
 
@@ -20,9 +18,9 @@ source $HOME/miniforge3/bin/activate dfot
 
 cd $SCRATCH/Code/diffusion-forcing-transformer
 
-srun python -m main \
-    +name=RE10k \
-    dataset=realestate10k \
+python -m main \
+    +name=DL3DV \
+    dataset=dl3dv \
     algorithm=dfot_video_pose \
     experiment=video_generation \
     @diffusion/continuous

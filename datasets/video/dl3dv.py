@@ -159,12 +159,9 @@ class DL3DVBaseVideoDataset(BaseVideoDataset):
 
     def build_transform(self):
         """
-        Override to support non-square resizing using optional cfg fields
-        `resolution_height` and `resolution_width`. Falls back to square `resolution`.
+        Build transform for square resolution.
         """
-        height = getattr(self.cfg, "resolution_height", self.resolution)
-        width = getattr(self.cfg, "resolution_width", self.resolution)
-        return VideoTransform((height, width))
+        return VideoTransform((self.resolution, self.resolution))
 
 
 class DL3DVSimpleVideoDataset(DL3DVBaseVideoDataset, BaseSimpleVideoDataset):
@@ -224,9 +221,6 @@ class DL3DVAdvancedVideoDataset(DL3DVBaseVideoDataset, BaseAdvancedVideoDataset)
 
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        if self.split != "training":
-            return super().__getitem__(idx)
-
         video_idx, start_frame = self.get_clip_location(idx)
         video_metadata = self.metadata[video_idx]
         video_length = self.video_length(video_metadata)
