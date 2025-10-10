@@ -237,25 +237,38 @@ class DL3DVAdvancedVideoDataset(DL3DVBaseVideoDataset, BaseAdvancedVideoDataset)
             cam_data = np.load(cam_fp)
             
             # Extract intrinsics (fx, fy, cx, cy) and extrinsics (3x4 matrix)
-            if "intrinsics" in cam_data:
-                # If intrinsics are available, use them
-                intrinsics = cam_data["intrinsics"]  # Should be (fx, fy, cx, cy)
-                pose = cam_data["pose"]  # 4x4 matrix
-            else:
-                # Fallback: assume default intrinsics based on resolution
-                # This is a reasonable default for DL3DV dataset
-                resolution = getattr(self.cfg, "resolution", 256)
-                fx = fy = resolution * 0.7  # Reasonable focal length
-                cx = cy = resolution / 2.0  # Center of image
-                intrinsics = np.array([fx, fy, cx, cy], dtype=np.float32)
-                pose = cam_data["pose"]  # 4x4 matrix
+            if "intrinsic" not in cam_data:
+                raise KeyError(f"Missing 'intrinsic' key in camera file: {cam_fp}")
+            if "pose" not in cam_data:
+                raise KeyError(f"Missing 'pose' key in camera file: {cam_fp}")
+            
+            intrinsic_matrix = cam_data["intrinsic"]  # Should be 3x3 matrix
+            pose = cam_data["pose"]  # 4x4 matrix
+            
+            # Validate intrinsic matrix shape
+            if intrinsic_matrix.shape != (3, 3):
+                raise ValueError(f"Expected intrinsic matrix shape (3, 3), got {intrinsic_matrix.shape} in {cam_fp}")
+            
+            # Validate pose shape
+            if pose.shape != (4, 4):
+                raise ValueError(f"Expected pose shape (4, 4), got {pose.shape} in {cam_fp}")
+            
+            # Extract fx, fy, cx, cy from 3x3 intrinsic matrix
+            # K = [[fx, 0, cx],
+            #      [0, fy, cy],
+            #      [0,  0,  1]]
+            fx = intrinsic_matrix[0, 0]
+            fy = intrinsic_matrix[1, 1]
+            cx = intrinsic_matrix[0, 2]
+            cy = intrinsic_matrix[1, 2]
+            intrinsics_vector = np.array([fx, fy, cx, cy], dtype=np.float32)
             
             # Extract 3x4 extrinsic matrix from 4x4 pose matrix
             extrinsic_3x4 = pose[:3, :]  # Take first 3 rows (3x4)
             
             # Combine intrinsics and extrinsics: [fx, fy, cx, cy] + [3x4 extrinsic flattened]
             cond_vector = np.concatenate([
-                intrinsics,  # 4 elements
+                intrinsics_vector,  # 4 elements
                 extrinsic_3x4.flatten()  # 12 elements
             ])
             cams.append(torch.as_tensor(cond_vector, dtype=torch.float32))
