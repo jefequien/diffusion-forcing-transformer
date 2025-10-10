@@ -2,11 +2,13 @@ defaults:
   - base_video
 
 save_dir: data/dl3dv
-external_cond_dim: 0
+external_cond_dim: 16
 max_frames: 8
 frame_skip: 10
 context_length: 4
-resolution: 64
+resolution: 256
+resolution_width: 512
+resolution_height: 256
 data_mean: [[[0.5]], [[0.5]], [[0.5]]]
 data_std: [[[0.5]], [[0.5]], [[0.5]]]
 filter_min_len: null
