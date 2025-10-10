@@ -5,7 +5,6 @@ from omegaconf import DictConfig
 from PIL import Image
 import numpy as np
 from pathlib import Path
-import pandas as pd
 
 from .base_video import (
     BaseVideoDataset,
@@ -42,21 +41,19 @@ class DL3DVBaseVideoDataset(BaseVideoDataset):
 
     def build_metadata(self, split: SPLIT) -> None:
         """
-        Build metadata by reading `save_dir/processed_dl3dv_ours/metadata.csv` and
-        selecting shards by split:
+        Build metadata by globbing video directories and counting frames directly.
+        Selects shards by split:
           - training: 1K, 2K, 3K, 4K, 5K
           - validation: 6K
           - test: 7K
 
-        Each CSV row should contain (at least) a relative path under
-        `processed_dl3dv_ours` to a sequence directory `{shard}/{hash}`. We will
-        derive the RGB directory `{shard}/{hash}/dense/rgb` and count frames.
+        Each sequence directory `{shard}/{hash}` contains `dense/rgb` with frames
+        named `frame_XXXXX.png`. We glob these directories and count frames directly.
         """
+        import glob
+        
         root = self.save_dir / "processed_dl3dv_ours"
-        csv_path = root / "metadata.csv"
-        if not csv_path.exists():
-            raise FileNotFoundError(f"DL3DV metadata CSV not found: {csv_path}")
-
+        
         split_to_shards = {
             "training": {"1K", "2K", "3K", "4K", "5K"},
             "validation": {"6K"},
@@ -69,36 +66,62 @@ class DL3DVBaseVideoDataset(BaseVideoDataset):
         video_fps: List[float] = []
         n_frames_list: List[int] = []
 
-        # Read CSV with pandas and use n_frames directly
-        df = pd.read_csv(csv_path)
-        required_cols = {"image_rel_path", "fps", "n_frames"}
-        if not required_cols.issubset(df.columns):
-            raise ValueError(f"metadata.csv missing required columns: {required_cols} not in {set(df.columns)}")
+        # Default FPS for DL3DV dataset (can be overridden if needed)
+        default_fps = 5.0
 
-        # Filter rows by shard
-        df = df.copy()
-        df["shard"] = df["image_rel_path"].apply(lambda p: str(p).split("/")[0])
-        df = df[df["shard"].isin(allowed_shards)]
-
-        for _, row in df.iterrows():
-            rel_image_path = str(row["image_rel_path"]).strip()
-            if not pd.notna(row["fps"]):
-                raise ValueError(f"Missing fps for sequence {rel_image_path} in metadata.csv")
-            fps_val = float(row["fps"])  # no fallback
-            if not pd.notna(row["n_frames"]):
-                raise ValueError(f"Missing n_frames for sequence {rel_image_path} in metadata.csv")
-            n_frames_val = int(row["n_frames"])  # no fallback
-            if n_frames_val <= 0:
-                continue
-            rgb_dir = root / rel_image_path
-            # Do not glob frames; trust n_frames from CSV
-            video_paths.append(rgb_dir)
-            video_pts.append(torch.arange(n_frames_val, dtype=torch.long))
-            video_fps.append(fps_val)
-            n_frames_list.append(n_frames_val)
+        # Glob all sequence directories for allowed shards
+        for shard in allowed_shards:
+            shard_pattern = str(root / shard / "*")
+            sequence_dirs = glob.glob(shard_pattern)
+            
+            for seq_dir in sequence_dirs:
+                seq_path = Path(seq_dir)
+                rgb_dir = seq_path / "dense" / "rgb"
+                
+                # Check if RGB directory exists
+                if not rgb_dir.exists():
+                    continue
+                
+                # Glob all frame files and count them
+                frame_pattern = str(rgb_dir / "frame_*.png")
+                frame_files = glob.glob(frame_pattern)
+                
+                if len(frame_files) == 0:
+                    continue
+                
+                # Sort frame files to ensure correct ordering
+                frame_files.sort()
+                
+                # Extract frame numbers and verify they're consecutive starting from 1
+                frame_numbers = []
+                for frame_file in frame_files:
+                    frame_name = Path(frame_file).name
+                    # Extract number from frame_XXXXX.png
+                    try:
+                        frame_num = int(frame_name.split('_')[1].split('.')[0])
+                        frame_numbers.append(frame_num)
+                    except (ValueError, IndexError):
+                        continue
+                
+                # Verify frames are consecutive starting from 1
+                if not frame_numbers or frame_numbers[0] != 1:
+                    continue
+                
+                expected_frames = list(range(1, len(frame_numbers) + 1))
+                if frame_numbers != expected_frames:
+                    continue
+                
+                n_frames_val = len(frame_numbers)
+                if n_frames_val <= 0:
+                    continue
+                
+                video_paths.append(rgb_dir)
+                video_pts.append(torch.arange(n_frames_val, dtype=torch.long))
+                video_fps.append(default_fps)
+                n_frames_list.append(n_frames_val)
 
         if len(video_paths) == 0:
-            raise RuntimeError(f"No sequences found for split {split} using CSV {csv_path}")
+            raise RuntimeError(f"No sequences found for split {split} in {root}")
 
         metadata: Dict[str, Any] = {
             "video_paths": video_paths,
