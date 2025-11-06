@@ -35,7 +35,7 @@ algorithm:
       interpolated: False
   logging:
     max_num_videos: 256
-    metrics: [vbench, is, temporal_consistency_met3r_cosine, loop_consistency_met3r_cosine, depth_collision]
+    metrics: [fvd, is, fid, lpips, mse, ssim, psnr]
   backbone:
     channels: [128, 256, 576, 1152]
     num_updown_blocks: [3, 3, 6]
