@@ -49,7 +49,10 @@ class BaseDataModule(pl.LightningDataModule):
         return self._dataloader("training")
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
-        return self._dataloader("validation")
+        #return self._dataloader("validation")
+        return [
+            self._dataloader(split) for split in self.exp_cfg.validation.dataset_splits
+        ]
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
         return self._dataloader("test")

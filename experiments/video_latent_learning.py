@@ -1,6 +1,7 @@
 from datasets.video import (
     MinecraftAdvancedVideoDataset,
     Kinetics600AdvancedVideoDataset,
+    RealEstate10KAdvancedVideoDataset,
 )
 from algorithms.vae import ImageVAETrainer, VideoVAETrainer
 from .base_exp import BaseLightningExperiment
@@ -21,6 +22,7 @@ class VideoLatentLearningExperiment(BaseLightningExperiment):
     compatible_datasets = dict(
         minecraft=MinecraftAdvancedVideoDataset,
         kinetics_600=Kinetics600AdvancedVideoDataset,
+        realestate10k=RealEstate10KAdvancedVideoDataset,
     )
 
     data_module_cls = _data_module_cls

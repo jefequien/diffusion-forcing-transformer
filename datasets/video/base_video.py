@@ -58,6 +58,7 @@ class BaseVideoDataset(torch.utils.data.Dataset, ABC):
             for split in self._ALL_SPLITS:
                 self.build_metadata(split)
 
+        # loads a dict of length (number of raw videos)
         self.metadata = self.load_metadata()
         self.augment_dataset()
         self.transform = self.build_transform()
@@ -128,7 +129,7 @@ class BaseVideoDataset(torch.utils.data.Dataset, ABC):
         """
         before_len = len(metadata)
         metadata = [
-            video_metadata for video_metadata in metadata if filter_fn(video_metadata)
+            video_metadata for video_metadata in tqdm(metadata) if filter_fn(video_metadata)
         ]
         after_len = len(metadata)
         rank_zero_print(
@@ -425,15 +426,17 @@ class BaseAdvancedVideoDataset(BaseVideoDataset):
             if self.cfg.num_eval_videos > len(self.cumulative_sizes):
                 rank_zero_print(
                     cyan(
-                        f"There are less clips ({len(self.cumulative_sizes)}) in the dataset than the number of requested evaluation clips ({self.cfg.num_eval_videos})"
+                        f"There are less clips ({len(self.cumulative_sizes)}) in the dataset than the number of requested evaluation clips ({self.cfg.num_eval_videos}), sampling some clips multiple times"
                     )
                 )
             random.seed(0)
             idx_remap = []
-            for start, end in zip(
-                [0] + self.cumulative_sizes[:-1], self.cumulative_sizes
-            ):
-                idx_remap.append(random.randrange(start, end))
+            while len(idx_remap) < self.cfg.num_eval_videos:
+                for start, end in zip(
+                    [0] + self.cumulative_sizes[:-1], self.cumulative_sizes
+                ):
+                    idx_remap.append(random.randrange(start, end))
+            # shuffle the indices for evaluation    
             random.shuffle(idx_remap)
             return idx_remap[: self.cfg.num_eval_videos]
 
@@ -469,8 +472,10 @@ class BaseAdvancedVideoDataset(BaseVideoDataset):
         )
 
     def get_clip_location(self, idx: int) -> Tuple[int, int]:
+        
         idx = self.idx_remap[idx]
         video_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+
         if video_idx == 0:
             clip_idx = idx
         else:
@@ -498,6 +503,7 @@ class BaseAdvancedVideoDataset(BaseVideoDataset):
         """
         Load video and conditions from video_idx with given start_frame and end_frame (exclusive)
         """
+
         video = self.load_video(video_metadata, start_frame, end_frame)
         cond = self.load_cond(video_metadata, start_frame, end_frame)
         return video, cond
@@ -507,7 +513,7 @@ class BaseAdvancedVideoDataset(BaseVideoDataset):
             self.subdataset_size
             if self.use_subdataset
             else (
-                min(self.cfg.num_eval_videos, len(self.cumulative_sizes))
+                self.cfg.num_eval_videos
                 if self.use_evaluation_subdataset
                 else self.cumulative_sizes[-1]
             )

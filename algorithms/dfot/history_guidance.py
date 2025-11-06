@@ -1,4 +1,5 @@
 from typing import List, Tuple, Literal, Optional, Callable, Dict, Any
+from jaxtyping import Float
 from collections import defaultdict
 import os
 import io
@@ -641,6 +642,20 @@ class HistoryGuidance:
             A mask that represents the state of tokens in the sequence.
             0 = to be generated, 1 = ground truth history, 2 = generated history, -1 = padding
         """
+
+        if mask.ndim == 3:
+            return GeneralizedHistoryGuidanceManager(self, mask)
+        elif (
+            len(self.hist_weights) == 1
+            and len(self.hist_segments[0].freq_ranges) == 1
+            and self.hist_segments[0].freq_ranges[0] == ALL
+            and self.hist_segments[0].freq_ranges_if_generated[0] == ALL
+        ):
+            return SimpleHistoryGuidanceManager(self, mask)
+        else:
+            return HistoryGuidanceManager(self, mask)
+
+        """
         return (
             SimpleHistoryGuidanceManager(self, mask)
             if len(self.hist_weights) == 1
@@ -649,6 +664,7 @@ class HistoryGuidance:
             and self.hist_segments[0].freq_ranges_if_generated[0] == ALL
             else HistoryGuidanceManager(self, mask)
         )
+        """
 
     def log(self, logger: Optional[Logger] = None):
         """
@@ -717,6 +733,32 @@ class HistoryGuidance:
                 HistorySegment(
                     time_indices=ALL,
                     freq_ranges=[ALL],
+                    freq_ranges_if_generated=[(stabilization_level, 1.0)],
+                )
+            ],
+            hist_weights=[1],
+            timesteps=timesteps,
+            use_external_cond_guidance=False,
+            visualize=visualize,
+        )
+
+    @classmethod
+    def stabilized_conditional_on_ground_truth(
+        cls,
+        stabilization_level: float,
+        timesteps: int = 1000,
+        visualize: bool = True,
+    ) -> "HistoryGuidance":
+        """
+        History guidance scheme equivalent to:
+        conditional sampling with stabilization technique (Chen et al., https://arxiv.org/abs/2407.01392)
+        """
+        return cls(
+            hist_segments=[
+                HistorySegment(
+                    time_indices=ALL,
+                    # freq_ranges=[ALL],
+                    freq_ranges=[(stabilization_level, 1.0)],
                     freq_ranges_if_generated=[(stabilization_level, 1.0)],
                 )
             ],
@@ -931,6 +973,7 @@ class SimpleHistoryGuidanceManager:
         to_noise_levels: torch.Tensor,
         replacement_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         replacement_only: bool = False,
+        generator: Optional[torch.Generator] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.guidance_scale == 1:
             return x, from_noise_levels, to_noise_levels, None
@@ -939,9 +982,11 @@ class SimpleHistoryGuidanceManager:
         from_noise_levels = repeat(from_noise_levels, "b t -> b h t", h=2).clone()
         to_noise_levels = repeat(to_noise_levels, "b t -> b h t", h=2).clone()
 
+        # fully mask the history tokens (whether they are generated or provided as gt)
+        # to compute the unconditional score
         from_noise_levels[:, 0, :] = torch.where(
             self.mask >= 1,
-            self.history_guidance.timesteps - 1,
+            self.history_guidance.timesteps - 1,  # maximum noise level
             from_noise_levels[:, 0, :],
         )
         to_noise_levels[:, 0, :] = torch.where(
@@ -952,7 +997,8 @@ class SimpleHistoryGuidanceManager:
 
         x[:, 0, :] = torch.where(
             self._extend(self.mask >= 1, x[:, 0, :]),
-            replacement_fn(x[:, 0, :], from_noise_levels[:, 0, :]),
+            # replacement_fn(x[:, 0, :], from_noise_levels[:, 0, :]),
+            replacement_fn(x[:, 0, :], from_noise_levels[:, 0, :], generator=generator),
             x[:, 0, :],
         )
         x, from_noise_levels, to_noise_levels = map(
@@ -973,8 +1019,141 @@ class SimpleHistoryGuidanceManager:
     def _extend(self, a: torch.Tensor, x: torch.Tensor):
         return rearrange(a, "... -> ..." + " 1" * (x.ndim - a.ndim))
 
-    def compose(self, x: torch.Tensor) -> torch.Tensor:
+    def compose(
+        self, x: torch.Tensor
+    ) -> torch.Tensor:
+
         if self.guidance_scale == 1:
             return x
+
         x = rearrange(x, "(b h) t ... -> b h t ...", h=2).clone()
         return x[:, 1, :] * self.guidance_scale - x[:, 0, :] * (self.guidance_scale - 1)
+
+class GeneralizedHistoryGuidanceManager:
+    """
+    A generalized history guidance manager (in the sense that it can apply history guidance on partially denoised tokens - unlike HistoryGuidanceManager and it can compose multiple score functions unlike SimpleHistoryGuidanceManager)
+
+    Another key difference is the convention for guidance scales:
+    In SimpleHistoryGuidanceManager and HistoryGuidanceManager, guidance_scale = 1 corresponds to no guidance,
+    where as in GeneralizedHistoryGuidanceManager, guidance_scale = 0 corresponds to no guidance.
+    """
+
+    def __init__(self, history_guidance: "HistoryGuidance", mask: torch.Tensor):
+        self.history_guidance = history_guidance
+        self.visualizer = history_guidance.visualizer
+        self.mask = mask
+        self.device = mask.device
+        self.guidance_scales = torch.tensor(
+            self.history_guidance.hist_weights, device=self.device, dtype=torch.float32
+        )
+
+    @property
+    def nfe(self) -> int:
+        """
+        # assuming mask.shape = (batch_size, nfe, seq_len)
+        return self.mask.shape[1]
+        """
+        # assuming mask.shape = (batch_size, nfe-1, seq_len)
+        return self.mask.shape[1] + 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+    def prepare(
+        self,
+        x: torch.Tensor,
+        from_noise_levels: torch.Tensor,
+        to_noise_levels: torch.Tensor,
+        replacement_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        replacement_only: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        x = repeat(x, "b t ... -> b h t ...", h=self.nfe).clone()
+        from_noise_levels = repeat(
+            from_noise_levels, "b t -> b h t", h=self.nfe
+        ).clone()
+        to_noise_levels = repeat(to_noise_levels, "b t -> b h t", h=self.nfe).clone()
+
+        # fully mask the history tokens (whether they are generated or provided as gt) to compute the unconditional score
+        # self.mask.shape = (batch_size, nfe-1, seq_len)
+        # from_noise_levels.shape = (batch, nfe, seq_len)
+        # to_noise_levels.shape = (batch, nfe, seq_len)
+        # the last row of dim=1, corresponds to the fully conditional score
+        # every previous row of dim=1 corresponds to a different history guidance scheme
+        guidance_mask = torch.cat(
+            [self.mask, torch.zeros_like(self.mask[:, 0:1, ...])], dim=1
+        )
+
+        """
+        # self.mask.shape = (batch_size, nfe, seq_len)
+        # from_noise_levels.shape = (batch, nfe, seq_len)
+        # to_noise_levels.shape = (batch, nfe, seq_len)
+        guidance_mask = self.mask
+        """
+
+        from_noise_levels = torch.where(
+            guidance_mask >= 1,
+            self.history_guidance.timesteps - 1,  # maximum noise level
+            from_noise_levels,
+        )
+        to_noise_levels = torch.where(
+            guidance_mask >= 1,
+            self.history_guidance.timesteps - 1,
+            to_noise_levels,
+        )
+
+        x = torch.where(
+            self._extend(guidance_mask >= 1, x),
+            torch.stack(
+                [
+                    replacement_fn(x[:, nfe], from_noise_levels[:, nfe])
+                    for nfe in range(self.nfe)
+                ],
+                dim=1,
+            ),
+            x,
+        )
+
+        x, from_noise_levels, to_noise_levels = map(
+            lambda y: rearrange(y, "b h t ... -> (b h) t ..."),
+            (x, from_noise_levels, to_noise_levels),
+        )
+
+        # shape = (b, nfe)
+        # for now, we only use external conditioning guidance for the 1st score function
+        # the final score function corresponds to the fully conditional score
+        # this is tailor made for the situation where we want to compose
+        # 1) guidance w.r.t. just the external conditioning
+        # 2) history guidance w.r.t. neighboring chunks
+        cond_mask = (
+            repeat(
+                torch.tensor([1] + [0] * (self.nfe - 1), device=self.device).bool(),
+                "h -> (b h)",
+                b=x.size(0) // self.nfe,
+            ).clone()
+            if self.history_guidance.use_external_cond_guidance
+            else None
+        )
+
+        return x, from_noise_levels, to_noise_levels, cond_mask
+
+    def _extend(self, a: torch.Tensor, x: torch.Tensor):
+        return rearrange(a, "... -> ..." + " 1" * (x.ndim - a.ndim))
+
+    def compose(
+        self, x: torch.Tensor
+    ) -> torch.Tensor:
+
+        x = rearrange(x, "(b h) t ... -> b h t ...", h=self.nfe).clone()
+
+        guidance_scales = torch.cat(
+            [
+                -self.guidance_scales,
+                torch.sum(self.guidance_scales, dim=0, keepdim=True) + 1,               # corresponds to the fully conditional score
+            ],
+            dim=0,
+        )  # shape = (nfe,)
+        return einsum(x, guidance_scales, "b h t ..., h -> b t ...").to(x.dtype)

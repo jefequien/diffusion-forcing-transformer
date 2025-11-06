@@ -1,4 +1,5 @@
 from typing import Optional, Any, Dict, Literal, Callable, Tuple
+from jaxtyping import Float, Int
 from functools import partial
 from omegaconf import DictConfig
 import numpy as np
@@ -18,14 +19,14 @@ from algorithms.vae import ImageVAE, VideoVAE
 from utils.print_utils import cyan
 from utils.distributed_utils import rank_zero_print, is_rank_zero
 from utils.torch_utils import bernoulli_tensor
-from utils.logging_utils import log_video
+from utils.logging_utils import log_video, log_spatial_neighbors
 from utils.torch_utils import freeze_model
+from utils.retrieval_utils import FOVDistance
 from .diffusion import (
     DiscreteDiffusion,
     ContinuousDiffusion,
 )
 from .history_guidance import HistoryGuidance
-
 
 class DFoTVideo(BasePytorchAlgo):
     """
@@ -73,11 +74,20 @@ class DFoTVideo(BasePytorchAlgo):
         self.logging = cfg.logging
         self.tasks = [
             task
-            for task in ["prediction", "interpolation"]
+            for task in [
+                "prediction",
+                "interpolation",
+            ]
             if getattr(cfg.tasks, task).enabled
         ]
         self.num_logged_videos = 0
         self.generator = None
+        # TODO: fix intrinsics if necessary
+        self.fov_distance = FOVDistance(
+            frustum_length=cfg.fov_distance.frustum_length,
+            num_samples=cfg.fov_distance.n_samples,
+            fix_intrinsics=cfg.fov_distance.fix_intrinsics,
+        )
 
         super().__init__(cfg)
 
@@ -135,6 +145,7 @@ class DFoTVideo(BasePytorchAlgo):
                         registry,
                         metric_types,
                         split_batch_size=self.logging.metrics_batch_size,
+                        cfg=self.cfg.logging,
                     )
                 case "interpolation":
                     assert (
@@ -146,6 +157,7 @@ class DFoTVideo(BasePytorchAlgo):
                         registry,
                         metric_types,
                         split_batch_size=self.logging.metrics_batch_size,
+                        cfg=self.cfg.logging,
                     )
 
     def configure_optimizers(self):
@@ -187,11 +199,11 @@ class DFoTVideo(BasePytorchAlgo):
 
     def _metrics(
         self,
-        task: Literal["prediction", "interpolation"],
+        task: Literal[
+            "prediction",
+            "interpolation",
+        ],
     ) -> Optional[VideoMetric]:
-        """
-        Get the appropriate metrics object for the given task.
-        """
         return getattr(self, f"metrics_{task}", None)
 
     # ---------------------------------------------------------------------
@@ -292,10 +304,18 @@ class DFoTVideo(BasePytorchAlgo):
             assert (
                 not self.is_latent_video_vae
             ), "Masks should not be provided from the dataset when using VideoVAE."
+            masks = batch["masks"]
         else:
             masks = torch.ones(*xs.shape[:2]).bool().to(self.device)
 
-        return xs, conditions, masks, gt_videos
+        return (
+            xs,
+            conditions,
+            masks,
+            batch.get("dataset_index", None),
+            batch.get("dataset_names", None),
+            gt_videos,
+        )
 
     # ---------------------------------------------------------------------
     # Training
@@ -306,7 +326,7 @@ class DFoTVideo(BasePytorchAlgo):
         xs, conditions, masks, *_ = batch
 
         noise_levels, masks = self._get_training_noise_levels(xs, masks)
-        xs_pred, loss = self.diffusion_model(
+        xs_pred, loss, x_t = self.diffusion_model(
             xs,
             self._process_conditions(conditions),
             k=noise_levels,
@@ -345,23 +365,46 @@ class DFoTVideo(BasePytorchAlgo):
     # Validation & Test
     # ---------------------------------------------------------------------
 
+    # def validation_step(self, batch, batch_idx, namespace="validation") -> STEP_OUTPUT:
     @torch.no_grad()
-    def validation_step(self, batch, batch_idx, namespace="validation") -> STEP_OUTPUT:
-        """Validation step"""
-        # 1. If running validation while training a model, directly evaluate
-        # the denoising performance to detect overfitting, etc.
-        # Logs the "denoising_vis" visualization as well as "validation/loss" metric.
-        if self.trainer.state.fn == "FIT":
-            self._eval_denoising(batch, batch_idx, namespace=namespace)
+    def validation_step(
+        self, batch, batch_idx, dataloader_idx=0, namespace="validation"
+    ) -> STEP_OUTPUT:
+        # Validation step
 
-        # 2. Sample all videos (based on the specified tasks)
-        # and log the generated videos and metrics.
-        if not (
-            self.trainer.sanity_checking and not self.cfg.logging.sanity_generation
-        ):
+        # Handle different dataloaders (typically idx=0 for validation, idx=1 for training)
+        if dataloader_idx == 0:
+            # 1. If running validation while training a model, directly evaluate
+            # the denoising performance to detect overfitting, etc.
+            # Logs the "denoising_vis" visualization as well as "validation/loss" metric.
+            if self.trainer.state.fn == "FIT":
+                self._eval_denoising(batch, batch_idx, namespace=namespace)
+
+            # 2. Sample all videos (based on the specified tasks)
+            # and log the generated videos and metrics.
+            # if not (
+            #    self.trainer.sanity_checking and not self.cfg.logging.sanity_generation
+            # ):
             all_videos = self._sample_all_videos(batch, batch_idx, namespace)
+
+            all_videos["dataset_index"] = batch[3]
+            all_videos["dataset_names"] = batch[4]
+            all_videos["conditions"] = batch[
+                1
+            ]  # moved this to inside _sample_all_videos() to remain consistent with "trajectory_stitching" branch's implementation
+
             self._update_metrics(all_videos)
             self._log_videos(all_videos, namespace)
+
+            if self.cfg.loop_closure.enabled:
+                self._log_miscellany(all_videos, namespace)
+
+        elif dataloader_idx == 1:
+            # perform denoising evaluation on training batches
+            if self.trainer.state.fn == "FIT":
+                self._eval_denoising(
+                    batch, batch_idx, namespace="eval_denoising_on_train"
+                )
 
     def on_validation_epoch_start(self) -> None:
         if self.cfg.logging.deterministic is not None:
@@ -405,7 +448,7 @@ class DFoTVideo(BasePytorchAlgo):
 
     def _eval_denoising(self, batch, batch_idx, namespace="training") -> None:
         """Evaluate the denoising performance during training."""
-        xs, conditions, masks, gt_videos = batch
+        xs, conditions, masks, *_, gt_videos = batch
 
         xs = xs[:, : self.max_tokens]
         if conditions is not None:
@@ -428,7 +471,9 @@ class DFoTVideo(BasePytorchAlgo):
                 (0, 0, 0, 0, 0, 0, 0, gt_videos.shape[1] - recons.shape[1], 0, 0),
             )
 
-        gt_videos, recons = self.gather_data((gt_videos, recons))
+        gt_videos, recons, conditions = self.gather_data(
+            (gt_videos, recons, conditions)
+        )
 
         if not (
             is_rank_zero
@@ -445,7 +490,7 @@ class DFoTVideo(BasePytorchAlgo):
             recons[:num_videos_to_log],
             gt_videos[:num_videos_to_log],
             step=self.global_step,
-            namespace="denoising_vis",
+            namespace="denoising_vis_{}".format(namespace),
             logger=self.logger.experiment,
             indent=self.num_logged_videos,
             captions="denoised | gt",
@@ -460,6 +505,7 @@ class DFoTVideo(BasePytorchAlgo):
     ) -> Optional[Dict[str, Tensor]]:
         xs, conditions, *_, gt_videos = batch
         all_videos: Dict[str, Tensor] = {"gt": xs}
+        # all_videos["conditions"] = conditions
 
         for task in self.tasks:
             sample_fn = (
@@ -471,7 +517,6 @@ class DFoTVideo(BasePytorchAlgo):
 
         # remove None values
         all_videos = {k: v for k, v in all_videos.items() if v is not None}
-        # rearrange/unnormalize/detach the videos
         all_videos = {k: self._unnormalize_x(v).detach() for k, v in all_videos.items()}
         # decode latents if using latents
         if self.is_latent_diffusion:
@@ -732,6 +777,7 @@ class DFoTVideo(BasePytorchAlgo):
             }
 
         gt_videos = all_videos["gt"]
+        conditions = all_videos["conditions"]
         for task in self.tasks:
             metric = self._metrics(task)
             videos = all_videos[task]
@@ -743,7 +789,7 @@ class DFoTVideo(BasePytorchAlgo):
                     context_mask[[0, -1]] = True
             if self.logging.n_metrics_frames is not None:
                 context_mask = context_mask[: self.logging.n_metrics_frames]
-            metric(videos, gt_videos, context_mask=context_mask)
+            metric(videos, gt_videos, conditions=conditions, context_mask=context_mask)
 
     def _log_videos(self, all_videos: Dict[str, Tensor], namespace: str) -> None:
         """Log videos during validation/test step."""
@@ -764,6 +810,16 @@ class DFoTVideo(BasePytorchAlgo):
         cut_videos = lambda x: x[:num_videos_to_log]
 
         for task in self.tasks:
+            if all_videos["dataset_names"] is not None:
+                available_dataset_names = [
+                    tup[0] for tup in all_videos["dataset_names"]
+                ]
+                dataset_names = [
+                    available_dataset_names[i]
+                    for i in cut_videos(all_videos["dataset_index"].tolist())
+                ]
+            else:
+                dataset_names = [""] * num_videos_to_log
             log_video(
                 cut_videos(all_videos[task]),
                 cut_videos(all_videos["gt"]),
@@ -777,12 +833,62 @@ class DFoTVideo(BasePytorchAlgo):
                     if task == "prediction"
                     else torch.tensor(
                         [0, n_frames - 1], device=self.device, dtype=torch.long
-                    )
+                    )  # this corresponds to task == "interpolation"
                 ),
-                captions=f"{task} | gt",
+                captions=[f"{ds_name}: {task} | gt" for ds_name in dataset_names],
+                fps=3,
             )
 
         self.num_logged_videos += batch_size
+
+    def _log_miscellany(self, all_videos: Dict[str, Tensor], namespace: str) -> None:
+        """Log miscallany during validation/test step."""
+        all_videos = self.gather_data(all_videos)
+        batch_size, n_frames = all_videos["gt"].shape[:2]
+
+        # 1) visualize spatially close frame pairs
+        # compute fov overlap between all frame pairs
+        conditions = all_videos["conditions"]  # shape = (B, T, D)
+        fov_overlap = self.fov_distance(conditions, conditions)[0]  # shape = (B, T, T)
+
+        # average fov overlap with its transpose to make overlap symmetric
+        fov_overlap = torch.mean(
+            torch.stack([fov_overlap, fov_overlap.transpose(-1, -2)], dim=0), dim=0
+        )
+
+        # assert that fov_overlap is symmetric
+        assert torch.allclose(fov_overlap, fov_overlap.transpose(-1, -2))
+
+        # compute frame pairs (i, j) such that fov_overlap[i, j] > overlap_threshold
+        for b in range(batch_size):
+            spatial_neighbors = []
+            for i in range(n_frames):
+                for j in range(i + 1, n_frames):
+                    if fov_overlap[b, i, j] > self.cfg.fov_distance.overlap_threshold:
+                        # we also want to only visualize frame pairs that are temporally far away i.e. not within the same sliding window
+                        if n_frames <= self.max_tokens:
+                            spatial_neighbors.append(
+                                torch.tensor([i, j], device=self.device)
+                            )
+                        else:
+                            # if the number of frames is greater than the max tokens, we need to check if the frame pairs are within the same sliding window
+                            if abs(i - j) > self.max_tokens:
+                                spatial_neighbors.append(
+                                    torch.tensor([i, j], device=self.device)
+                                )
+
+            if len(spatial_neighbors) > 0:
+                spatial_neighbors = torch.stack(spatial_neighbors, dim=0)
+                for task in self.tasks:
+                    # Log Image
+                    log_spatial_neighbors(
+                        spatial_neighbors,
+                        all_videos[task][b],
+                        step=None if namespace == "test" else self.global_step,
+                        namespace=f"{task}_vis",
+                        prefix="spatial_neighbors",
+                        logger=self.logger.experiment,
+                    )
 
     # ---------------------------------------------------------------------
     # Data Preprocessing Utils
@@ -929,29 +1035,131 @@ class DFoTVideo(BasePytorchAlgo):
         self,
         horizon: int,
         padding: int = 0,
+        timestep_max: int = None,
+        timestep_min: int = None,
+        warmup_steps: int = None,
+        ode_steps: int = None,  # used for defining the timesteps in the multistep loop of Stochsync
     ):
-        match self.cfg.scheduling_matrix:
+
+        if ode_steps is not None:
+            sampling_timesteps = ode_steps
+        else:
+            sampling_timesteps = self.sampling_timesteps
+
+        match self.cfg.scheduling_matrix.name:
             case "full_sequence":
-                scheduling_matrix = np.arange(self.sampling_timesteps, -1, -1)[
+                scheduling_matrix = np.arange(sampling_timesteps, -1, -1)[
                     :, None
                 ].repeat(horizon, axis=1)
+
+                # repeat the scheduling matrix repeat_factor times
+                scheduling_matrix = np.repeat(
+                    scheduling_matrix, self.cfg.scheduling_matrix.repeat_factor, axis=0
+                )
+                scheduling_matrix = np.clip(scheduling_matrix, 0, sampling_timesteps)
             case "autoregressive":
                 scheduling_matrix = self._generate_pyramid_scheduling_matrix(
-                    horizon, self.sampling_timesteps
+                    horizon,
+                    self.cfg.scheduling_matrix.uncertainty_scale,
+                    self.cfg.scheduling_matrix.repeat_factor,
+                    sampling_timesteps=sampling_timesteps,
+                )
+            case "trapezoid":
+                scheduling_matrix = self._generate_trapezoid_scheduling_matrix(
+                    horizon,
+                    self.cfg.scheduling_matrix.uncertainty_scale,
+                    self.cfg.scheduling_matrix.repeat_factor,
+                    sampling_timesteps=sampling_timesteps,
                 )
 
         scheduling_matrix = torch.from_numpy(scheduling_matrix).long()
 
         scheduling_matrix = self.diffusion_model.ddim_idx_to_noise_level(
-            scheduling_matrix
+            scheduling_matrix,
+            timestep_max=timestep_max,
+            timestep_min=timestep_min,
+            sampling_timesteps=sampling_timesteps,
         )
 
-        # paded entries are labeled as pure noise
+        # padded entries are labeled as pure noise
         scheduling_matrix = F.pad(
             scheduling_matrix, (0, padding, 0, 0), value=self.timesteps - 1
         )
 
+        # for the first warmup_steps, set the noise level to max (i.e. self.timesteps - 1)
+        if warmup_steps is not None:
+            scheduling_matrix[:warmup_steps] = self.timesteps - 1
+
         return scheduling_matrix
+
+    def _generate_pyramid_scheduling_matrix(
+        self,
+        horizon: int,
+        uncertainty_scale: float = None,
+        repeat_factor: int = 1,
+        sampling_timesteps: int = None,
+    ):
+
+        def _generate_pyramid_scheduling_matrix_without_repeat(
+            horizon, uncertainty_scale, sampling_timesteps
+        ):
+            if uncertainty_scale is None:
+                uncertainty_scale = 0.0
+
+            height = sampling_timesteps + int((horizon - 1) * uncertainty_scale) + 1
+            scheduling_matrix = np.zeros((height, horizon), dtype=np.int64)
+            for m in range(height):
+                for t in range(horizon):
+                    scheduling_matrix[m, t] = (
+                        sampling_timesteps + int(t * uncertainty_scale) - m
+                    )
+            return np.clip(scheduling_matrix, 0, sampling_timesteps)
+
+        scheduling_matrix = _generate_pyramid_scheduling_matrix_without_repeat(
+            horizon, uncertainty_scale
+        )
+        scheduling_matrix = np.repeat(scheduling_matrix, repeat_factor, axis=0)
+
+        return np.clip(scheduling_matrix, 0, sampling_timesteps)
+
+    def _generate_trapezoid_scheduling_matrix(
+        self,
+        horizon: int,
+        uncertainty_scale: float = None,
+        repeat_factor: int = 1,
+        sampling_timesteps: int = None,
+    ):
+        def _generate_trapezoid_scheduling_matrix_without_repeat(
+            horizon, uncertainty_scale, sampling_timesteps
+        ):
+            if uncertainty_scale is None:
+                uncertainty_scale = 0.0
+
+            height = sampling_timesteps + int((horizon + 1) // 2 * uncertainty_scale)
+            scheduling_matrix = np.zeros((height, horizon), dtype=np.int64)
+            for m in range(height):
+                for t in range((horizon + 1) // 2):
+                    scheduling_matrix[m, t] = (
+                        sampling_timesteps + int(t * uncertainty_scale) - m
+                    )
+                    scheduling_matrix[m, -t] = (
+                        sampling_timesteps + int(t * uncertainty_scale) - m
+                    )
+
+                # if the horizon is even, we need to fill in the middle column
+                if horizon % 2 == 0:
+                    scheduling_matrix[m, horizon // 2] = (
+                        sampling_timesteps + int(horizon // 2 * uncertainty_scale) - m
+                    )
+
+            return np.clip(scheduling_matrix, 0, sampling_timesteps)
+
+        scheduling_matrix = _generate_trapezoid_scheduling_matrix_without_repeat(
+            horizon, uncertainty_scale, sampling_timesteps
+        )
+        scheduling_matrix = np.repeat(scheduling_matrix, repeat_factor, axis=0)
+
+        return np.clip(scheduling_matrix, 0, sampling_timesteps)
 
     def _predict_sequence(
         self,
@@ -1265,16 +1473,19 @@ class DFoTVideo(BasePytorchAlgo):
                         replacement_only=self.is_full_sequence,
                     )
                 )
-
                 if reconstruction_guidance > 0:
 
-                    def composed_guidance_fn(
-                        xk: torch.Tensor,
-                        pred_x0: torch.Tensor,
-                        alpha_cumprod: torch.Tensor,
-                    ) -> torch.Tensor:
+                    def base_reconstruction_guidance_fn(
+                        target: Float[Tensor, "B T C H W"],
+                        pred_x0: Float[Tensor, "B T C H W"],
+                        alpha_cumprod: Float[Tensor, "B T 1 1 1"],
+                        context_mask: Float[Tensor, "B T"],
+                        reconstruction_guidance: float,
+                        x_shape: Int[Tensor, "3"],
+                    ) -> Float[Tensor, ""]:
+                        target = target.clone().detach()
                         loss = (
-                            F.mse_loss(pred_x0, context, reduction="none")
+                            F.mse_loss(pred_x0, target, reduction="none")
                             * alpha_cumprod.sqrt()
                         )
                         _context_mask = rearrange(
@@ -1290,8 +1501,24 @@ class DFoTVideo(BasePytorchAlgo):
                         likelihood = -reconstruction_guidance * 0.5 * loss
                         return likelihood
 
+                    composed_guidance_fn = partial(
+                        base_reconstruction_guidance_fn,
+                        target=xs_pred,  # target = [x^a, z^b]
+                        context_mask=context_mask,  # context_mask = [1] * len(x^a) + [0] * len(z^b)
+                        reconstruction_guidance=reconstruction_guidance,
+                        x_shape=x_shape,
+                    )
                 else:
                     composed_guidance_fn = guidance_fn
+
+                # for the context frames, noise them to the current noise level using q_sample
+                # basically, we are taking x = [x^a, z^b] -> [z^a_t, z^b_t]
+                if self.is_full_sequence:
+                    xs_pred = torch.where(
+                        self._extend_x_dim(context_mask) >= 1,
+                        self.diffusion_model.q_sample(xs_pred, from_noise_levels),
+                        xs_pred,
+                    )
 
                 # update xs_pred by DDIM or DDPM sampling
                 xs_pred = self.diffusion_model.sample_step(
@@ -1311,7 +1538,7 @@ class DFoTVideo(BasePytorchAlgo):
                         from_noise_levels,
                     ),
                     conditions_mask,
-                    guidance_fn=composed_guidance_fn,
+                    composed_guidance_fn,
                 )
 
                 xs_pred = history_guidance_manager.compose(xs_pred)
@@ -1395,6 +1622,12 @@ class DFoTVideo(BasePytorchAlgo):
         shape = [1] * (xs.ndim - self.data_mean.ndim) + list(self.data_mean.shape)
         mean = self.data_mean.reshape(shape)
         std = self.data_std.reshape(shape)
+        return xs * std + mean
+
+    def _unnormalize_x_cpu(self, xs):
+        shape = [1] * (xs.ndim - self.data_mean.ndim) + list(self.data_mean.shape)
+        mean = self.data_mean.cpu().reshape(shape)
+        std = self.data_std.cpu().reshape(shape)
         return xs * std + mean
 
     # ---------------------------------------------------------------------

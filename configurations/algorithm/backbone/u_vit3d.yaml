@@ -9,3 +9,4 @@ num_mid_blocks: 16
 num_heads: 4
 pos_emb_type: rope
 use_checkpointing: [false, false, false, false]
+interpolate_factor: 1.

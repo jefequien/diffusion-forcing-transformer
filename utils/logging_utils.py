@@ -1,4 +1,5 @@
 from typing import Optional, List
+from jaxtyping import Float
 import wandb
 import numpy as np
 import torch
@@ -9,6 +10,7 @@ import matplotlib.animation as animation
 from PIL import Image
 from pathlib import Path
 import imageio
+import cv2
 
 plt.set_loglevel("warning")
 
@@ -17,17 +19,20 @@ from torchmetrics.functional import (
     structural_similarity_index_measure,
     universal_image_quality_index,
 )
-from einops import rearrange
+from einops import rearrange, repeat
 from torchmetrics.image import (
     LearnedPerceptualImagePatchSimilarity,
     FrechetInceptionDistance,
 )
+from typing import Tuple
+from utils import geometry_utils
 
 
 # FIXME: clean up & check this util
 def log_video(
     observation_hats: List[torch.Tensor] | torch.Tensor,
     observation_gt: Optional[torch.Tensor] = None,
+    miscellany: Optional[List[torch.Tensor]] = None,
     step=0,
     namespace="train",
     prefix="video",
@@ -39,6 +44,7 @@ def log_video(
     logger=None,
     n_frames=None,
     raw_dir=None,
+    fps=24,
 ):
     """
     take in video tensors in range [-1, 1] and log into wandb
@@ -58,13 +64,17 @@ def log_video(
     if isinstance(observation_hats, torch.Tensor):
         observation_hats = [observation_hats]
     if observation_gt is None:
+        observation_gt_is_none = True
         observation_gt = torch.zeros_like(observation_hats[0])
+    else:
+        observation_gt_is_none = False
     observation_gt = observation_gt.type_as(observation_hats[0])
 
     if isinstance(context_frames, int):
         context_frames = torch.arange(context_frames, device=observation_gt.device)
     for observation_hat in observation_hats:
         observation_hat[:, context_frames] = observation_gt[:, context_frames]
+        # observation_hat[:, -context_frames-1] = observation_gt[:, -context_frames-1]
 
     if raw_dir is not None:
         raw_dir = Path(raw_dir)
@@ -99,17 +109,49 @@ def log_video(
         for observation_hat in observation_hats:
             observation_hat[:, context_frames, i, indices, :] = c
             observation_hat[:, context_frames, i, :, indices] = c
+            # observation_hat[:, -context_frames-1, i, indices, :] = c
+            # observation_hat[:, -context_frames-1, i, :, indices] = c
         observation_gt[:, :, i, [0, -1], :] = c
         observation_gt[:, :, i, :, [0, -1]] = c
-    video = torch.cat([*observation_hats, observation_gt], -1).detach().cpu().numpy()
+    if miscellany is not None:
+        video = (
+            torch.cat([*observation_hats, observation_gt, *miscellany], -1)
+            .detach()
+            .cpu()
+            .numpy()
+        )
+    else:
+        video = (
+            torch.cat([*observation_hats, observation_gt], -1).detach().cpu().numpy()
+        )
+    if miscellany is not None:
+        multiview_grid = (
+            torch.cat([*observation_hats, observation_gt, *miscellany], -2)
+            .detach()
+            .cpu()
+            .numpy()
+        )
+    else:
+        multiview_grid = (
+            torch.cat([*observation_hats, observation_gt], -2).detach().cpu().numpy()
+        )
 
     # reshape to original shape
     if n_frames is not None:
         video = rearrange(
             video, "(b n) t c h w -> b (n t) c h w", n=n_frames // video.shape[1]
         )
+        multiview_grid = rearrange(
+            multiview_grid,
+            "(b n) t c h w -> b (n t) c h w",
+            n=n_frames // video.shape[1],
+        )
 
     video = (np.clip(video, a_min=0.0, a_max=1.0) * 255).astype(np.uint8)
+    multiview_grid = (np.clip(multiview_grid, a_min=0.0, a_max=1.0) * 255).astype(
+        np.uint8
+    )
+
     # video[..., 1:] = video[..., :1]  # remove framestack, only visualize current frame
     n_samples = len(video)
     # use wandb directly here since pytorch lightning doesn't support logging videos yet
@@ -122,10 +164,306 @@ def log_video(
         caption = captions[i] if i < len(captions) else None
         logger.log(
             {
-                name: wandb.Video(video[i], fps=24, caption=caption),
+                name: wandb.Video(video[i], fps=1, caption=caption),
                 "trainer/global_step": step,
             }
         )
+
+
+def log_spatial_neighbors(
+    spatial_neighbors: Float[torch.Tensor, "num_frame_pairs 2"],
+    xs_pred: Float[torch.Tensor, "T C H W"],
+    step=0,
+    namespace="train",
+    prefix="spatial_neighbors",
+    logger=None,
+):
+    if not logger:
+        logger = wandb
+
+    def label_video_frames_float(
+        frames,
+        circle_color=(0, 0, 255),  # red in BGR
+        circle_radius=22,
+        circle_thickness=2,
+        font=cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale=0.6,
+        font_thickness=2,
+        corner_offset=(30, 30),
+    ):
+        """
+        frames: float32/float64 ndarray with shape (T, C, H, W) and values in [0, 1]
+        returns: same shape & dtype, still in [0, 1], with frame indices overlaid
+        """
+        if frames.dtype not in (np.float32, np.float64):
+            raise TypeError("Input must be float32/float64 in [0, 1].")
+
+        T, C, H, W = frames.shape
+        # ---- 1. Re‑arrange to (T, H, W, C) and make a contiguous copy ----
+        rgb = frames.transpose(0, 2, 3, 1).copy()  # keep float [0,1]
+
+        # ---- 2. Convert once to uint8 for fast drawing ----
+        draw = (rgb * 255).astype(np.uint8)  # contiguous
+
+        cx, cy = corner_offset
+        for idx in range(T):
+            img = draw[idx]
+
+            # Circle
+            cv2.circle(
+                img,
+                (cx, cy),
+                circle_radius,
+                circle_color,
+                thickness=circle_thickness,
+                lineType=cv2.LINE_AA,
+            )
+
+            # Text centred in the circle
+            text = str(idx)
+            (tw, th), _ = cv2.getTextSize(text, font, font_scale, font_thickness)
+            origin = (cx - tw // 2, cy + th // 2)
+            cv2.putText(
+                img,
+                text,
+                origin,
+                font,
+                font_scale,
+                circle_color,
+                font_thickness,
+                lineType=cv2.LINE_AA,
+            )
+
+        # ---- 3. Back to float [0,1] in the original layout ----
+        labelled = draw.astype(np.float32) / 255.0
+        return labelled.transpose(0, 3, 1, 2)
+
+    # label xs_pred with its frame index in the top left corner
+    spatial_neighbors = spatial_neighbors.cpu().numpy()
+    xs_pred = xs_pred.cpu().numpy()
+    xs_pred = label_video_frames_float(xs_pred)
+
+    # use spatial_neighbors to index into xs_pred and return a tensor of shape (num_frame_pairs, 2, C, H, W)
+    xs_pred_spatial_neighbors = xs_pred[spatial_neighbors]
+    xs_pred_spatial_neighbors = rearrange(
+        xs_pred_spatial_neighbors, "n p c h w -> (n h) (p w) c"
+    )
+    xs_pred_spatial_neighbors = np.clip(
+        xs_pred_spatial_neighbors * 255.0, a_min=0.0, a_max=255.0
+    ).astype(np.uint8)
+
+    name = f"{namespace}/{prefix}"
+    logger.log(
+        {
+            name: wandb.Image(
+                xs_pred_spatial_neighbors,
+                caption=f"Each row is a pair of spatial neighbors",
+            ),
+            "trainer/global_step": step,
+        }
+    )
+
+
+# def get_camera_params(conditions: torch.Tensor, ref_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+#     """
+#     Args:
+#         conditions: [B, T, 12]
+#         ref_mask: [B, T]
+#     Returns:
+#         K: [B, T, 4];  [fx, fy, cx, cy]
+#         R_rc: [B, T, 3, 3]
+#         T_rc: [B, T, 3]
+#     """
+#     camera_poses = conditions.clone()
+#     K, RT_w2c = camera_poses.split([4, 12], dim=-1)
+#     RT_w2c = rearrange(RT_w2c, "b t (i j) -> b t i j", i=3, j=4)
+#     R_w2c = RT_w2c[..., :3, :3]
+#     T_w2c = RT_w2c[..., :3, 3]
+#     R_c2w, T_c2w = geometry_utils.invert_extrinsics(R_w2c, T_w2c)
+#     R_c2w, T_c2w = geometry_utils.rebase_reference_frame(R_c2w, T_c2w)
+#     return K, R_c2w, T_c2w
+
+
+def visualize_conditions(
+    conditions: torch.Tensor, plot_trajectory: bool = True
+) -> torch.Tensor:
+    """
+    Visualize the conditions (camera poses) for a video.
+    Args:
+        conditions: Tensor of shape [B, T, 16] containing camera poses
+                   where each pose is [intrinsic, rotation, translation] flattened
+    Returns:
+        Tensor of shape [B, T, 3, H, W] containing the visualization video
+    """
+    B, T = conditions.shape[:2]
+    H, W = 256, 256  # Output image size
+    # K, R_wc, T_wc = get_camera_params(conditions)
+
+    camera_poses = geometry_utils.CameraPose.from_vectors(conditions)
+    camera_poses.normalize_by_first()
+    camera_poses.scale_within_bounds(1.0)
+    K = camera_poses.intrinsics(flatten=False)
+    R_w2c = camera_poses.extrinsics()[:, :, :3, :3]
+    T_w2c = camera_poses.extrinsics()[:, :, :3, 3]
+    R_c2w, T_c2w = geometry_utils.invert_extrinsics(R_w2c, T_w2c)
+
+    # Get camera frustums
+    frustum_trajectories = get_frustums(K, R_c2w, T_c2w, uv_range=[0, 1])
+
+    # Create visualization videos
+    videos = []
+    for b in range(B):
+        video = create_camera_path_video(
+            frustums=frustum_trajectories[b],
+            R_wc=R_c2w[b],
+            T_wc=T_c2w[b],
+            H=H,
+            W=W,
+            dpi=120,
+            colors=None,
+            plot_trajectory=plot_trajectory,
+        )
+        videos.append(video)
+
+    return (
+        torch.stack(videos, dim=0).to(conditions.device).float() / 255.0
+    )  # shape: [B, T, 3, H, W]
+
+
+@torch.no_grad()
+def get_frustums(
+    K: torch.Tensor, R_rc: torch.Tensor, T_rc: torch.Tensor, uv_range=[0, 1]
+) -> torch.Tensor:
+    """
+    Args:
+        K: [B, T, 3, 3];  [fx, fy, cx, cy]
+        R_rc: [B, T, 3, 3]
+        T_rc: [B, T, 3]
+    Returns:
+        frustum: [B, T, 8, 3]
+    """
+    frustum, frustum_width, frustum_height, frustum_center = geometry_utils.get_frustum(
+        K, uv_range=uv_range, frustum_scale=0.1, center_ray_mult=5.0
+    )
+    frustum = (
+        torch.einsum("...ij,...elj->...eli", R_rc, frustum) + T_rc[..., None, None, :]
+    )
+    return frustum
+
+
+def create_camera_path_video(
+    frustums,  # [T, 9, 2, 3], each: 9 edges (8 edges + 1 center ray), start/end points in world coords
+    R_wc,  # [T, 3, 3], not used (already in world coords), kept just for shape check
+    T_wc,  # [T, 3],    camera centers in world coords, for optional trajectory lines
+    H=256,  # output image height
+    W=256,  # output image width
+    dpi=120,
+    colors=None,  # None or [T, 3] in float RGB (0..1)
+    plot_trajectory=True,
+) -> torch.Tensor:
+    """
+    Returns a video of shape [T, 3, H, W] showing the camera path being revealed over time.
+    Each frame shows all cameras up to the current time step.
+    """
+    if isinstance(frustums, torch.Tensor):
+        frustums = frustums.detach().cpu().numpy()
+    if isinstance(R_wc, torch.Tensor):
+        R_wc = R_wc.detach().cpu().numpy()
+    if isinstance(T_wc, torch.Tensor):
+        T_wc = T_wc.detach().cpu().numpy()
+
+    R_align = np.array(
+        [
+            [1, 0, 0],
+            [0, 0, 1],
+            [0, -1, 0],
+        ]
+    )
+    R_wc = np.einsum("ij,...jk->...ik", R_align, R_wc)
+    T_wc = np.einsum("ij,...j->...i", R_align, T_wc)
+    frustums = np.einsum("ij,...j->...i", R_align, frustums)
+
+    import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    import matplotlib.cm as cm
+
+    # Total number of cameras
+    T = frustums.shape[0]
+
+    # Use viridis colormap if colors not provided
+    if colors is None:
+        colors = cm.get_cmap("viridis")(np.linspace(0, 1, T))[
+            :, :3
+        ]  # shape: [T, 3] in 0..1
+
+    # Create output video array: (T, 3, H, W)
+    video = np.zeros((T, 3, H, W), dtype=np.uint8)
+
+    # Create a figure and canvas for rendering
+    fig = Figure(figsize=(W / dpi, H / dpi), dpi=dpi)
+    fig.subplots_adjust(left=0, bottom=0.1, right=1, top=1)  # Trim figure margins
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Pre-calc view limits using all points (frustums and camera centers)
+    all_points = frustums.reshape(-1, 3)
+    all_points = np.vstack([all_points, T_wc])
+    min_xyz = all_points.min(axis=0)
+    max_xyz = all_points.max(axis=0)
+    center = (min_xyz + max_xyz) / 2
+    size = max(max_xyz - min_xyz)
+
+    # For each time step, render the scene with only cameras up to that time visible
+    for t in range(T):
+        ax.clear()
+
+        # Plot cameras up to current time
+        for i in range(t + 1):
+            color = colors[i]
+            # Plot each frustum edge with the color from viridis (or provided colors)
+            edges = frustums[i]  # shape: [9, 2, 3]
+            for edge in edges:
+                start, end = edge
+                ax.plot(
+                    [start[0], end[0]],
+                    [start[1], end[1]],
+                    [start[2], end[2]],
+                    color=color,
+                    alpha=0.5,
+                )
+            if plot_trajectory:
+                # Plot camera center path connecting consecutive cameras using same color
+                if i > 0:
+                    ax.plot(
+                        [T_wc[i - 1, 0], T_wc[i, 0]],
+                        [T_wc[i - 1, 1], T_wc[i, 1]],
+                        [T_wc[i - 1, 2], T_wc[i, 2]],
+                        color=color,
+                        alpha=0.5,
+                    )
+
+        # Set equal aspect ratio
+        ax.set_box_aspect([1, 1, 1])
+        # Set consistent view limits
+        ax.set_xlim(center[0] - size / 2, center[0] + size / 2)
+        ax.set_ylim(center[1] - size / 2, center[1] + size / 2)
+        ax.set_zlim(center[2] - size / 2, center[2] + size / 2)
+
+        ax.set_xlabel("X")
+        ax.set_ylabel("Z")
+        ax.set_zlabel("--Y")
+
+        # Render to image from canvas (extract RGBA, then drop alpha)
+        canvas.draw()
+        img = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8)
+        img = img.reshape(H, W, 4)[..., :3]
+
+        # Convert from HWC to CHW and store in video array
+        video[t] = np.transpose(img, (2, 0, 1))
+
+    plt.close(fig)
+    return torch.from_numpy(video)
 
 
 def get_validation_metrics_for_videos(

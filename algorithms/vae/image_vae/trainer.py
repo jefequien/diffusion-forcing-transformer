@@ -309,7 +309,9 @@ class ImageVAE(VAE):
             path = wandb_to_local_path(path)
         elif is_hf_path(path):
             path = hf_to_local_path(path)
-        checkpoint = torch.load(path, map_location="cpu")
+        #checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)           # weights_only = True results in error for pytorch version 2.6 and above
+
         # FIXME: temporary fix for vaes trained with older versions of the code (for minecraft VAE)
         if "cfg" not in checkpoint:
             checkpoint["cfg"] = OmegaConf.load(

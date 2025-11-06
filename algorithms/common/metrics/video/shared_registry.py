@@ -22,6 +22,7 @@ class SharedVideoMetricModelRegistry(nn.ModuleDict):
         VideoMetricType.MSE: [],
         VideoMetricType.SSIM: [],
         VideoMetricType.PSNR: [],
+        #VideoMetricType.MET3R_LOOPED: [],  # MET3R doesn't need any shared models
         VideoMetricType.FVMD: [VideoMetricModelType.PIPS],
         VideoMetricType.VBENCH: [
             VideoMetricModelType.CLIP_B_32,
@@ -32,6 +33,21 @@ class SharedVideoMetricModelRegistry(nn.ModuleDict):
             VideoMetricModelType.RAFT,
             VideoMetricModelType.AMT_S,
         ],
+        VideoMetricType.LOOP_CONSISTENCY_LPIPS: [VideoMetricModelType.LPIPS],
+        VideoMetricType.LOOP_CONSISTENCY_SSIM: [],
+        VideoMetricType.LOOP_CONSISTENCY_PSNR: [],
+        VideoMetricType.LOOP_CONSISTENCY_MSE: [],
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_COSINE: [],
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_LPIPS: [VideoMetricModelType.LPIPS],
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_SSIM: [],
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_PSNR: [],
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_MSE: [],
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_COSINE: [],
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_LPIPS: [VideoMetricModelType.LPIPS],
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_SSIM: [],
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_MSE: [],
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_PSNR: [],
+        VideoMetricType.DEPTH_COLLISION: [],  # Depth collision metric doesn't need shared models
         VideoMetricType.REAL_VBENCH: [
             VideoMetricModelType.CLIP_B_32,
             VideoMetricModelType.CLIP_L_14,

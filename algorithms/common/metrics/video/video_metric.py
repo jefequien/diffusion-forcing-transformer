@@ -1,4 +1,5 @@
 from typing import List, Optional, Set, Tuple, Iterable
+from omegaconf import DictConfig
 import torch
 from torch import Tensor
 from torch import nn
@@ -14,9 +15,12 @@ from .fvmd import FrechetVideoMotionDistance
 from .inception_score import InceptionScore
 from .lpips import LearnedPerceptualImagePatchSimilarity
 from .vbench import VBench
+from .loop_consistency import LoopConsistency
+from .temporal_consistency import TemporalConsistency
+from .depth_collision import DepthCollisionMetric
 from .types import VideoMetricType, VideoMetricModelType
 from .shared_registry import SharedVideoMetricModelRegistry
-
+#from .met3r import MET3RMetric, NormalizedMET3RMetric
 
 class VideoMetric(nn.Module):
     """
@@ -36,6 +40,8 @@ class VideoMetric(nn.Module):
         VideoMetricType.FVMD,
         VideoMetricType.VBENCH,
         VideoMetricType.REAL_VBENCH,
+        VideoMetricType.DEPTH_COLLISION,
+        #VideoMetricType.MET3R_LOOPED,
     }
 
     # Evaluated for the entire video, evaluated using "shared" I3D features
@@ -57,12 +63,36 @@ class VideoMetric(nn.Module):
         VideoMetricType.PSNR,
     }
 
+    # Loop consistency metrics
+    LOOP_CONSISTENCY_METRICS = {
+        VideoMetricType.LOOP_CONSISTENCY_LPIPS,
+        VideoMetricType.LOOP_CONSISTENCY_SSIM,
+        VideoMetricType.LOOP_CONSISTENCY_PSNR,
+        VideoMetricType.LOOP_CONSISTENCY_MSE,
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_COSINE,
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_LPIPS,
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_SSIM,
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_MSE,
+        VideoMetricType.LOOP_CONSISTENCY_MET3R_PSNR,
+    }
+
+    # Temporal consistency metrics
+    TEMPORAL_CONSISTENCY_METRICS = {
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_COSINE,
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_LPIPS,
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_SSIM,
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_MSE,
+        VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_PSNR,
+    }
+
     def __init__(
         self,
         registry: SharedVideoMetricModelRegistry,
         metric_types: List[str] | List[VideoMetricType],
         split_batch_size: int = 16,
+        cfg: DictConfig = None,
     ):
+        self.cfg = cfg
         super().__init__()
         modules = {}
         metric_types = [VideoMetricType(metric_type) for metric_type in metric_types]
@@ -88,6 +118,98 @@ class VideoMetric(nn.Module):
                     module = StructuralSimilarityIndexMeasure(data_range=1.0)
                 case VideoMetricType.PSNR:
                     module = PeakSignalNoiseRatio(data_range=1.0)
+                #case VideoMetricType.MET3R_LOOPED:
+                #    module = MET3RMetric(img_size=256)
+                case VideoMetricType.LOOP_CONSISTENCY_LPIPS:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="lpips",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.LOOP_CONSISTENCY_SSIM:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="ssim",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.LOOP_CONSISTENCY_MSE:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="mse",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.LOOP_CONSISTENCY_PSNR:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="psnr",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.LOOP_CONSISTENCY_MET3R_COSINE:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_cosine",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.LOOP_CONSISTENCY_MET3R_LPIPS:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_lpips",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.LOOP_CONSISTENCY_MET3R_SSIM:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_ssim",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.LOOP_CONSISTENCY_MET3R_MSE:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_mse",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.LOOP_CONSISTENCY_MET3R_PSNR:
+                    module = LoopConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_psnr",
+                        **cfg.loop_consistency,
+                    )
+                case VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_COSINE:
+                    module = TemporalConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_cosine",
+                        **cfg.temporal_consistency,
+                    )
+                case VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_LPIPS:
+                    module = TemporalConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_lpips",
+                        **cfg.temporal_consistency,
+                    )
+                case VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_SSIM:
+                    module = TemporalConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_ssim",
+                        **cfg.temporal_consistency,
+                    )
+                case VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_MSE:
+                    module = TemporalConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_mse",
+                        **cfg.temporal_consistency,
+                    )
+                case VideoMetricType.TEMPORAL_CONSISTENCY_MET3R_PSNR:
+                    module = TemporalConsistency(
+                        registry=registry,
+                        similarity_metric="met3r_psnr",
+                        **cfg.temporal_consistency,
+                    )
+                case VideoMetricType.DEPTH_COLLISION:
+                    depth_collision_cfg = getattr(cfg, 'depth_collision', {})
+                    module = DepthCollisionMetric(
+                        registry=registry,
+                        **depth_collision_cfg,
+                    )
                 case _:
                     raise ValueError(f"Unknown video metric type: {metric_type}")
             registry.register_for_metric(metric_type)
@@ -143,6 +265,7 @@ class VideoMetric(nn.Module):
         self,
         preds: Tensor,
         target: Tensor,
+        conditions: Optional[Tensor] = None,
         context_mask: Optional[Tensor] = None,
     ):
         """
@@ -158,14 +281,30 @@ class VideoMetric(nn.Module):
         # we split the batch into smaller chunks and update metrics for each chunk.
         preds_split = preds.chunk(self.split_batch_size, dim=0)
         target_split = target.chunk(self.split_batch_size, dim=0)
+
+        if conditions is not None:
+            conditions_split = conditions.chunk(self.split_batch_size, dim=0)
+            assert len(preds_split) == len(
+                conditions_split
+            ), "Batch size of preds and conditions must be the same."
+        else:
+            conditions_split = None
+
         assert len(preds_split) == len(
             target_split
         ), "Batch size of preds and target must be the same."
-        for preds_chunk, target_chunk in zip(preds_split, target_split):
-            self._update(preds_chunk, target_chunk, context_mask)
+        
+        for preds_chunk, target_chunk, conditions_chunk in zip(
+            preds_split, target_split, conditions_split
+        ):
+            self._update(preds_chunk, target_chunk, conditions_chunk, context_mask)
 
     def _update(
-        self, preds: Tensor, target: Tensor, context_mask: Optional[Tensor] = None
+        self,
+        preds: Tensor,
+        target: Tensor,
+        conditions: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
     ):
         """
         Note:
@@ -217,7 +356,27 @@ class VideoMetric(nn.Module):
         for metric_type, module in self._filtered_items(
             self.VIDEO_WISE_METRICS - self.I3D_DEPENDENT_METRICS - self.VBENCH_METRICS
         ):
-            module.update(preds, target)
+            # if metric_type == VideoMetricType.MET3R_LOOPED:
+            #    module.update(preds, target, conditions)
+            # else:
+            if metric_type in {VideoMetricType.DEPTH_COLLISION}:
+                # These metrics only need predictions, not targets
+                module.update(preds)
+            else:
+                module.update(preds, target)
+
+        # update loop consistency metrics
+        if conditions is not None:
+            for metric_type, module in self._filtered_items(
+                self.LOOP_CONSISTENCY_METRICS
+            ):
+                module.update(preds, conditions)
+
+        # update temporal consistency metrics
+        for metric_type, module in self._filtered_items(
+            self.TEMPORAL_CONSISTENCY_METRICS
+        ):
+            module.update(preds, conditions)
 
         # reshape a batch of videos to a batch of image frames
         preds, target = map(
@@ -227,6 +386,9 @@ class VideoMetric(nn.Module):
 
         # update frame-wise metrics
         for metric_type, module in self._filtered_items(self.FRAME_WISE_METRICS):
+            # if metric_type == VideoMetricType.MET3R_LOOPED:
+            #    module.update(preds, target, conditions)
+            # else:
             module.update(preds, target)
 
     def log(self, prefix: str):

@@ -13,6 +13,11 @@ from ..backbones import (
     UViT3DPose,
 )
 from .noise_schedule import make_beta_schedule
+from ..history_guidance import (
+    HistoryGuidanceManager,
+    SimpleHistoryGuidanceManager,
+    GeneralizedHistoryGuidanceManager,
+)
 
 
 def extract(a, t, x_shape):
@@ -224,9 +229,14 @@ class DiscreteDiffusion(nn.Module):
         )
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def q_sample(self, x_start, k, noise=None):
+    def q_sample(self, x_start, k, noise=None, generator=None):
         if noise is None:
-            noise = torch.randn_like(x_start)
+            if generator is None:
+                noise = torch.randn_like(x_start)
+            else:
+                noise = torch.randn(
+                    *x_start.shape, generator=generator, device=x_start.device
+                )
             noise = torch.clamp(noise, -self.clip_noise, self.clip_noise)
 
         return (
@@ -351,9 +361,24 @@ class DiscreteDiffusion(nn.Module):
 
         return x_pred, loss
 
-    def ddim_idx_to_noise_level(self, indices: torch.Tensor):
+    def ddim_idx_to_noise_level(
+        self,
+        indices: torch.Tensor,
+        timestep_max: int = None,
+        timestep_min: int = None,
+        sampling_timesteps: int = None,
+    ):
         shape = indices.shape
-        real_steps = torch.linspace(-1, self.timesteps - 1, self.sampling_timesteps + 1)
+
+        if timestep_max is None:
+            timestep_max = self.timesteps - 1
+        if timestep_min is None:
+            timestep_min = -1
+        if sampling_timesteps is None:
+            sampling_timesteps = self.sampling_timesteps
+
+        # real_steps = torch.linspace(-1, self.timesteps - 1, self.sampling_timesteps + 1)
+        real_steps = torch.linspace(timestep_min, timestep_max, sampling_timesteps + 1)
         real_steps = real_steps.long().to(indices.device)
         k = real_steps[indices.flatten()]
         return k.view(shape)
@@ -363,9 +388,10 @@ class DiscreteDiffusion(nn.Module):
         x: torch.Tensor,
         curr_noise_level: torch.Tensor,
         next_noise_level: torch.Tensor,
-        external_cond: Optional[torch.Tensor],
+        external_cond: Optional[torch.Tensor] = None,
         external_cond_mask: Optional[torch.Tensor] = None,
         guidance_fn: Optional[Callable] = None,
+        update_where_noise_level_same: Optional[bool] = False,
     ):
         if self.is_ddim_sampling:
             return self.ddim_sample_step(
@@ -375,6 +401,7 @@ class DiscreteDiffusion(nn.Module):
                 external_cond=external_cond,
                 external_cond_mask=external_cond_mask,
                 guidance_fn=guidance_fn,
+                update_where_noise_level_same=update_where_noise_level_same,
             )
 
         # FIXME: temporary code for checking ddpm sampling
@@ -434,22 +461,26 @@ class DiscreteDiffusion(nn.Module):
         external_cond: Optional[torch.Tensor],
         external_cond_mask: Optional[torch.Tensor] = None,
         guidance_fn: Optional[Callable] = None,
+        update_where_noise_level_same: Optional[bool] = False,
     ):
 
         clipped_curr_noise_level = torch.clamp(curr_noise_level, min=0)
 
         alpha = self.alphas_cumprod[clipped_curr_noise_level]
+
         alpha_next = torch.where(
             next_noise_level < 0,
             torch.ones_like(next_noise_level),
             self.alphas_cumprod[next_noise_level],
         )
+        # sigma fixed small
         sigma = torch.where(
             next_noise_level < 0,
             torch.zeros_like(next_noise_level),
             self.ddim_sampling_eta
             * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt(),
         )
+
         c = (1 - alpha_next - sigma**2).sqrt()
 
         alpha = self.add_shape_channels(alpha)
@@ -503,14 +534,297 @@ class DiscreteDiffusion(nn.Module):
         x_pred = x_start * alpha_next.sqrt() + pred_noise * c + sigma * noise
 
         # only update frames where the noise level decreases
-        mask = curr_noise_level == next_noise_level
-        x_pred = torch.where(
-            self.add_shape_channels(mask),
-            x,
-            x_pred,
-        )
+        if not update_where_noise_level_same:
+            mask = curr_noise_level == next_noise_level
+            x_pred = torch.where(
+                self.add_shape_channels(mask),
+                x,
+                x_pred,
+            )
 
         return x_pred
+
+    def sample_step_windows_history_guidance(
+        self,
+        x: torch.Tensor,
+        curr_noise_level: torch.Tensor,
+        next_noise_level: torch.Tensor,
+        external_cond: Optional[torch.Tensor],
+        external_cond_mask: Optional[torch.Tensor] = None,
+        guidance_fn: Optional[Callable] = None,
+        num_windows: Optional[int] = None,
+        update_where_noise_level_same: Optional[bool] = False,
+        noise: Optional[torch.Tensor] = None,
+        minibatch_size: Optional[int] = None,
+        history_guidance_manager: Optional[
+            HistoryGuidanceManager
+            | SimpleHistoryGuidanceManager
+            | GeneralizedHistoryGuidanceManager
+        ] = None,
+        max_stoch: Optional[bool] = False,
+    ):
+        if self.is_ddim_sampling:
+            return self.ddim_sample_step_windows_history_guidance(
+                x=x,
+                curr_noise_level=curr_noise_level,
+                next_noise_level=next_noise_level,
+                external_cond=external_cond,
+                external_cond_mask=external_cond_mask,
+                guidance_fn=guidance_fn,
+                num_windows=num_windows,
+                update_where_noise_level_same=update_where_noise_level_same,
+                noise=noise,
+                minibatch_size=minibatch_size,
+                history_guidance_manager=history_guidance_manager,
+                max_stoch=max_stoch,
+            )
+        else:
+            raise NotImplementedError(
+                "ddpm sampling is not yet implemented. It can instead be realized by setting eta = 1.0, max_stoch = False, and sampling_timesteps = timesteps."
+            )
+
+    def ddim_sample_step_windows_history_guidance(
+        self,
+        x: torch.Tensor,
+        curr_noise_level: torch.Tensor,
+        next_noise_level: torch.Tensor,
+        external_cond: Optional[torch.Tensor],
+        external_cond_mask: Optional[torch.Tensor] = None,
+        guidance_fn: Optional[Callable] = None,
+        num_windows: Optional[int] = None,
+        update_where_noise_level_same: Optional[bool] = False,
+        noise: Optional[torch.Tensor] = None,
+        minibatch_size: Optional[int] = None,
+        history_guidance_manager: Optional[
+            HistoryGuidanceManager
+            | SimpleHistoryGuidanceManager
+            | GeneralizedHistoryGuidanceManager
+        ] = None,
+        max_stoch: Optional[bool] = False,
+    ):
+
+        clipped_curr_noise_level = torch.clamp(curr_noise_level, min=0)
+
+        alpha = self.alphas_cumprod[clipped_curr_noise_level]
+        alpha_next = torch.where(
+            next_noise_level < 0,
+            torch.ones_like(next_noise_level),
+            self.alphas_cumprod[next_noise_level],
+        )
+
+        if max_stoch:
+            sigma_squared_base = 1 - alpha_next
+        else:
+            # sigma fixed small
+            sigma_squared_base = (
+                (1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)
+            )
+
+        # shape = (B * nfe * windows, self.max_tokens)
+        sigma = torch.where(
+            next_noise_level < 0,
+            torch.zeros_like(next_noise_level),
+            self.ddim_sampling_eta * sigma_squared_base.sqrt(),
+            # * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt(),
+        )
+        c = torch.clamp(
+            1 - alpha_next - (self.ddim_sampling_eta**2) * sigma_squared_base, min=0
+        ).sqrt()
+
+        alpha = self.add_shape_channels(alpha)
+        alpha_next = self.add_shape_channels(alpha_next)
+        c = self.add_shape_channels(c)
+        sigma = self.add_shape_channels(sigma)
+
+        if guidance_fn is not None:
+            raise NotImplementedError(
+                "guidance_fn is not yet implemented for ddim_sample_step_windows_history_guidance."
+            )
+        else:
+
+            if minibatch_size is None:
+                model_pred = self.model_predictions(
+                    x=x,
+                    k=clipped_curr_noise_level,
+                    external_cond=external_cond,
+                    external_cond_mask=external_cond_mask,
+                )
+            else:
+                # split inputs into minibatches to avoid OOM
+                # x.shape = (b, ...)
+                # clipped_curr_noise_level.shape = (b, ...)
+                # external_cond.shape = (b, ...)
+                # external_cond_mask.shape = (b, ...)
+
+                assert (
+                    minibatch_size < x.shape[0]
+                ), "minibatch_size {} should be less than the original batch size of batch_size * nfe * num_windows = {}".format(
+                    minibatch_size, x.shape[0]
+                )
+
+                x_splits = torch.split(x, minibatch_size, dim=0)
+                clipped_curr_noise_level_splits = torch.split(
+                    clipped_curr_noise_level, minibatch_size, dim=0
+                )
+                external_cond_splits = torch.split(external_cond, minibatch_size, dim=0)
+
+                if external_cond_mask is not None:
+                    external_cond_mask_splits = torch.split(
+                        external_cond_mask, minibatch_size, dim=0
+                    )
+                else:
+                    external_cond_mask_splits = [None for _ in range(len(x_splits))]
+
+                model_pred_splits = [
+                    self.model_predictions(
+                        x_split,
+                        k=clipped_curr_noise_level_split,
+                        external_cond=external_cond_split,
+                        external_cond_mask=external_cond_mask_split,
+                    )
+                    for x_split, clipped_curr_noise_level_split, external_cond_split, external_cond_mask_split in zip(
+                        x_splits,
+                        clipped_curr_noise_level_splits,
+                        external_cond_splits,
+                        external_cond_mask_splits,
+                    )
+                ]
+                pred_noise = torch.cat(
+                    [
+                        model_pred_split.pred_noise
+                        for model_pred_split in model_pred_splits
+                    ],
+                    dim=0,
+                )
+                pred_x_start = torch.cat(
+                    [
+                        model_pred_split.pred_x_start
+                        for model_pred_split in model_pred_splits
+                    ],
+                    dim=0,
+                )
+                model_out = torch.cat(
+                    [
+                        model_pred_split.model_out
+                        for model_pred_split in model_pred_splits
+                    ],
+                    dim=0,
+                )
+
+                model_pred = ModelPrediction(
+                    pred_noise=pred_noise,
+                    pred_x_start=pred_x_start,
+                    model_out=model_out,
+                )
+
+            x_start = model_pred.pred_x_start
+            pred_noise = model_pred.pred_noise
+
+        if noise is None:
+            noise = torch.randn_like(x)
+            noise = torch.clamp(noise, -self.clip_noise, self.clip_noise)
+
+        x_pred_without_sigma_noise = x_start * alpha_next.sqrt() + pred_noise * c
+
+        # apply history guidance to model predictions
+        if history_guidance_manager is not None:
+
+            # shape = (b * nfe, windows, self.max_tokens, self.x_shape)
+            x_pred_without_sigma_noise = rearrange(
+                x_pred_without_sigma_noise,
+                "(b windows) max_tokens ... -> b (windows max_tokens) ...",
+                b=x_pred_without_sigma_noise.shape[0] // num_windows,
+                windows=num_windows,
+            )
+
+            x_pred_without_sigma_noise = history_guidance_manager.compose(
+                x_pred_without_sigma_noise
+            )
+
+            # shape = (b, windows, self.max_tokens, self.x_shape)
+            x_pred_without_sigma_noise = rearrange(
+                x_pred_without_sigma_noise,
+                "b (windows max_tokens) ... -> (b windows) max_tokens ...",
+                windows=num_windows,
+                max_tokens=self.max_tokens,
+            )
+
+            x_start = rearrange(
+                x_start,
+                "(b windows) max_tokens ... -> b (windows max_tokens) ...",
+                b=x_start.shape[0] // num_windows,
+                windows=num_windows,
+            )
+
+            x_start = history_guidance_manager.compose(x_start)
+
+            x_start = rearrange(
+                x_start,
+                "b (windows max_tokens) ... -> (b windows) max_tokens ...",
+                windows=num_windows,
+                max_tokens=self.max_tokens,
+            )
+
+            nfe = history_guidance_manager.nfe
+
+            # add sigma noise
+            sigma = rearrange(
+                sigma,
+                "(b nfe windows) ... -> b nfe windows ...",
+                b=sigma.shape[0] // (num_windows * nfe),
+                nfe=nfe,
+                windows=num_windows,
+            )
+
+            # only keep the first sigma noise term corresponding to the fully conditional score
+            noise = rearrange(
+                noise,
+                "(b nfe windows) ... -> b nfe windows ...",
+                b=noise.shape[0] // (num_windows * nfe),
+                nfe=nfe,
+                windows=num_windows,
+            )
+            sigma_noise = sigma * noise
+            sigma_noise = sigma_noise[
+                :, -1
+            ]  # sigma noise corresponding to the fully conditional score
+            sigma_noise = rearrange(sigma_noise, "b windows ... -> (b windows) ...")
+        else:
+            sigma_noise = sigma * noise
+
+        x_pred = x_pred_without_sigma_noise + sigma_noise
+
+        # only update frames where the noise level decreases
+        if not update_where_noise_level_same:
+            mask = curr_noise_level == next_noise_level
+            # assert that mask is same for all nfe's
+            mask = rearrange(
+                mask,
+                "(b nfe windows) ... -> b nfe windows ...",
+                b=mask.shape[0] // (num_windows * nfe),
+                nfe=nfe,
+                windows=num_windows,
+            )
+            mask = mask[:, -1]
+            mask = rearrange(mask, "b windows ... -> (b windows) ...")
+
+            x = rearrange(
+                x,
+                "(b nfe windows) ... -> b nfe windows ...",
+                b=x.shape[0] // (num_windows * nfe),
+                nfe=nfe,
+                windows=num_windows,
+            )
+            x = x[:, -1]
+            x = rearrange(x, "b windows ... -> (b windows) ...")
+
+            x_pred = torch.where(
+                self.add_shape_channels(mask),
+                x,
+                x_pred,
+            )
+
+        return x_pred, x_start
 
     def estimate_noise_level(self, x, mu=None):
         # x ~ ( B, T, C, ...)

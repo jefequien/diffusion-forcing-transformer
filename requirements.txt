@@ -33,3 +33,4 @@ zmq
 pytubefix
 roma
 transformers
+jaxtyping

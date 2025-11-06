@@ -162,4 +162,5 @@ class ContinuousDiffusion(DiscreteDiffusion):
         loss_weight = self.add_shape_channels(loss_weight)
         loss = loss * loss_weight
 
-        return x_pred, loss
+        #return x_pred, loss
+        return x_pred, loss, x_t

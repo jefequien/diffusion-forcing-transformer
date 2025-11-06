@@ -12,3 +12,4 @@ conditioning:
   type: ${algorithm.camera_pose_conditioning.type}
   dim: null # this will be overwritten at dfot_video_pose.py
 external_cond_dropout: 0.1 # probability of dropping a camera pose of each video during training 
+interpolate_factor: 1.

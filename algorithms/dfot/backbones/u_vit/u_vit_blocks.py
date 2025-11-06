@@ -174,6 +174,7 @@ class AxialRotaryEmbedding(nn.Module):
         sizes: Tuple[int, int] | Tuple[int, int, int],
         theta: float = 10000.0,
         flatten: bool = True,
+        interpolate_factor: float = 1.0,
     ):
         """
         If len(sizes) == 2, each axis corresponds to each dimension.
@@ -181,11 +182,11 @@ class AxialRotaryEmbedding(nn.Module):
         This enables to be compatible with the initializations of `.embeddings.RotaryEmbedding2D` and `.embeddings.RotaryEmbedding3D`.
         """
         super().__init__()
-        self.ax1 = RotaryEmbedding1D(dim, sizes[0], theta, flatten)
+        self.ax1 = RotaryEmbedding1D(dim, sizes[0], theta, flatten, interpolate_factor=interpolate_factor)
         self.ax2 = (
-            RotaryEmbedding1D(dim, sizes[1], theta, flatten)
+            RotaryEmbedding1D(dim, sizes[1], theta, flatten, interpolate_factor=interpolate_factor)
             if len(sizes) == 2
-            else RotaryEmbedding2D(dim, sizes[1:], theta, flatten)
+            else RotaryEmbedding2D(dim, sizes[1:], theta, flatten, interpolate_factor=interpolate_factor)
         )
 
 
@@ -256,7 +257,26 @@ class TransformerBlock(nn.Module):
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
         if self.rope is not None:
-            q, k = self.rope(q), self.rope(k)
+
+            # If the rope is a 2D rotary embedding, we apply it independently per frame.
+            if isinstance(self.rope, RotaryEmbedding2D):
+                # b (t h w) c -> b t h w c
+                T = q.shape[2] // (self.rope.sizes[0] * self.rope.sizes[1])
+
+                # assert divisibility
+                assert (
+                    T * self.rope.sizes[0] * self.rope.sizes[1] == q.shape[2]
+                ), "Temporal length must be divisible by the product of the dimensions of the rotary embedding."
+
+                # rearrange for independent rotary embedding per frame
+                q = rearrange(q, "b a (t hw) c -> b a t hw c", t=T)
+                k = rearrange(k, "b a (t hw) c -> b a t hw c", t=T)
+                q, k = self.rope(q), self.rope(k)
+                q = rearrange(q, "b a t hw c -> b a (t hw) c", t=T)
+                k = rearrange(k, "b a t hw c -> b a (t hw) c", t=T)
+
+            else:
+                q, k = self.rope(q), self.rope(k)
 
         # pylint: disable-next=not-callable
         x = F.scaled_dot_product_attention(q, k, v)

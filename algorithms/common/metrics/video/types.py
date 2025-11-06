@@ -13,7 +13,22 @@ class VideoMetricType(str, Enum):
     FVMD = "fvmd"
     VBENCH = "vbench"
     REAL_VBENCH = "real_vbench"
-
+    #MET3R_LOOPED = "met3r_looped"
+    LOOP_CONSISTENCY_LPIPS = "loop_consistency_lpips"
+    LOOP_CONSISTENCY_SSIM = "loop_consistency_ssim"
+    LOOP_CONSISTENCY_PSNR = "loop_consistency_psnr"
+    LOOP_CONSISTENCY_MSE = "loop_consistency_mse"
+    LOOP_CONSISTENCY_MET3R_COSINE = "loop_consistency_met3r_cosine"
+    LOOP_CONSISTENCY_MET3R_LPIPS = "loop_consistency_met3r_lpips"
+    LOOP_CONSISTENCY_MET3R_SSIM = "loop_consistency_met3r_ssim"
+    LOOP_CONSISTENCY_MET3R_MSE = "loop_consistency_met3r_mse"
+    LOOP_CONSISTENCY_MET3R_PSNR = "loop_consistency_met3r_psnr"
+    TEMPORAL_CONSISTENCY_MET3R_COSINE = "temporal_consistency_met3r_cosine"
+    TEMPORAL_CONSISTENCY_MET3R_LPIPS = "temporal_consistency_met3r_lpips"
+    TEMPORAL_CONSISTENCY_MET3R_SSIM = "temporal_consistency_met3r_ssim"
+    TEMPORAL_CONSISTENCY_MET3R_MSE = "temporal_consistency_met3r_mse"
+    TEMPORAL_CONSISTENCY_MET3R_PSNR = "temporal_consistency_met3r_psnr"
+    DEPTH_COLLISION = "depth_collision"
 
 class VideoMetricModelType(str, Enum):
     LPIPS = "Lpips"

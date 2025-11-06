@@ -6,7 +6,7 @@ from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 from einops import rearrange, repeat
 from ..base_backbone import BaseBackbone
-from ..modules.embeddings import RotaryEmbedding3D
+from ..modules.embeddings import RotaryEmbedding2D, RotaryEmbedding3D
 from ..dit.dit_base import SinusoidalPositionalEmbedding
 from .u_vit_blocks import (
     EmbedInput,
@@ -52,6 +52,7 @@ class UViT3D(BaseBackbone):
         self.use_checkpointing = list(cfg.use_checkpointing)
         self.temporal_length = max_tokens
 
+        self.interpolate_factor = cfg.interpolate_factor
         # ------------------------------ Initialization ---------------------------------
 
         super().__init__(
@@ -80,6 +81,7 @@ class UViT3D(BaseBackbone):
         assert self.pos_emb_type in [
             "learned_1d",
             "rope",
+            "rope2d",
         ], f"Positional embedding type {self.pos_emb_type} not supported."
 
         self.pos_embs = nn.ModuleDict({})
@@ -87,9 +89,9 @@ class UViT3D(BaseBackbone):
             if not self.is_transformers[i_level]:
                 continue
             pos_emb_cls, dim = None, None
-            if self.pos_emb_type == "rope":
+            if self.pos_emb_type in ["rope", "rope2d"]:
                 pos_emb_cls = (
-                    RotaryEmbedding3D
+                    RotaryEmbedding2D if self.pos_emb_type == "rope2d" else RotaryEmbedding3D
                     if block_types[i_level] == "TransformerBlock"
                     else AxialRotaryEmbedding
                 )
@@ -100,13 +102,14 @@ class UViT3D(BaseBackbone):
             level_resolution = resolution // patch_size // (2**i_level)
             self.pos_embs[f"{i_level}"] = pos_emb_cls(
                 dim,
-                (self.temporal_length, level_resolution, level_resolution),
+                (level_resolution, level_resolution) if self.pos_emb_type == "rope2d" else (self.temporal_length, level_resolution, level_resolution),
+                interpolate_factor=self.interpolate_factor,
             )
 
         def _rope_kwargs(i_level: int):
             return (
                 {"rope": self.pos_embs[f"{i_level}"]}
-                if self.pos_emb_type == "rope" and self.is_transformers[i_level]
+                if self.pos_emb_type in ["rope", "rope2d"] and self.is_transformers[i_level]
                 else {}
             )
 

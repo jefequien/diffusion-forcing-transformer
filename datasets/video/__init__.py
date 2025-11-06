@@ -7,6 +7,7 @@ from .kinetics_600 import (
     Kinetics600SimpleVideoDataset,
 )
 from .realestate10k import (
+    RealEstate10KAdvancedVideoDatasetWithLoops,
     RealEstate10KAdvancedVideoDataset,
     RealEstate10KSimpleVideoDataset,
 )

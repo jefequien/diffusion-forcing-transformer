@@ -164,6 +164,7 @@ class RotaryEmbeddingND(nn.Module):
         sizes: Tuple[int, ...],
         theta: float = 10000.0,
         flatten: bool = True,
+        interpolate_factor: float = 1.0,
     ):
         """
         Args:
@@ -175,11 +176,18 @@ class RotaryEmbeddingND(nn.Module):
         self.dims = dims
         self.theta = theta
         self.flatten = flatten
+        self.sizes = sizes
 
+        self.interpolate_factor = interpolate_factor
         Colon = slice(None)
         all_freqs = []
         for i, (dim, seq_len) in enumerate(zip(dims, sizes)):
-            freqs = self.get_freqs(dim, seq_len)
+            #freqs = self.get_freqs(dim, seq_len)
+            
+            freqs = self.get_freqs(
+                dim, seq_len, interpolate_factor=self.interpolate_factor if i == 0 else 1.0
+            )
+            
             all_axis = [None] * len(dims)
             all_axis[i] = Colon
             new_axis_slice = (Ellipsis, *all_axis, Colon)
@@ -189,11 +197,12 @@ class RotaryEmbeddingND(nn.Module):
             all_freqs = rearrange(all_freqs, "... d -> (...) d")
         self.register_buffer("freqs", all_freqs, persistent=False)
 
-    def get_freqs(self, dim: int, seq_len: int) -> torch.Tensor:
+    def get_freqs(self, dim: int, seq_len: int, interpolate_factor: float = 1.0) -> torch.Tensor:
         freqs = 1.0 / (
             self.theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
         )
-        pos = torch.arange(seq_len, dtype=freqs.dtype)
+        #pos = torch.arange(seq_len, dtype=freqs.dtype)
+        pos = torch.arange(seq_len, dtype=freqs.dtype) / interpolate_factor
         freqs = einsum("..., f -> ... f", pos, freqs)
         freqs = repeat(freqs, "... n -> ... (n r)", r=2)
         return freqs
@@ -223,9 +232,10 @@ class RotaryEmbedding1D(RotaryEmbeddingND):
         dim: int,
         seq_len: int,
         theta: float = 10000.0,
-        flatten: bool = True,
+        flatten: bool = True,   
+        interpolate_factor: float = 1.0,
     ):
-        super().__init__((dim,), (seq_len,), theta, flatten)
+        super().__init__((dim,), (seq_len,), theta, flatten, interpolate_factor)
 
 
 class RotaryEmbedding2D(RotaryEmbeddingND):
@@ -240,9 +250,10 @@ class RotaryEmbedding2D(RotaryEmbeddingND):
         sizes: Tuple[int, int],
         theta: float = 10000.0,
         flatten: bool = True,
+        interpolate_factor: float = 1.0,
     ):
         assert dim % 2 == 0, "RotaryEmbedding2D requires even dim"
-        super().__init__((dim // 2,) * 2, sizes, theta, flatten)
+        super().__init__((dim // 2,) * 2, sizes, theta, flatten, interpolate_factor)
 
 
 class RotaryEmbedding3D(RotaryEmbeddingND):
@@ -257,6 +268,7 @@ class RotaryEmbedding3D(RotaryEmbeddingND):
         sizes: Tuple[int, int, int],
         theta: float = 10000.0,
         flatten: bool = True,
+        interpolate_factor: float = 1.0,
     ):
         assert dim % 2 == 0, "RotaryEmbedding3D requires even dim"
         dim //= 2
@@ -271,7 +283,7 @@ class RotaryEmbedding3D(RotaryEmbeddingND):
             case 2:
                 dims = (dim // 3, dim // 3 + 1, dim // 3 + 1)
 
-        super().__init__(tuple(d * 2 for d in dims), sizes, theta, flatten)
+        super().__init__(tuple(d * 2 for d in dims), sizes, theta, flatten, interpolate_factor)
 
 
 class RandomEmbeddingDropout(nn.Module):
