@@ -1,3 +1,0 @@
-[submodule "third_party/Video-Depth-Anything"]
-	path = third_party/Video-Depth-Anything
-	url = git@github.com:andrewsonga/Video-Depth-Anything.git
