@@ -9,6 +9,7 @@ import matplotlib.animation as animation
 from PIL import Image
 from pathlib import Path
 import imageio
+from torchvision.utils import make_grid
 
 plt.set_loglevel("warning")
 
@@ -101,8 +102,24 @@ def log_video(
             observation_hat[:, context_frames, i, :, indices] = c
         observation_gt[:, :, i, [0, -1], :] = c
         observation_gt[:, :, i, :, [0, -1]] = c
-    video = torch.cat([*observation_hats, observation_gt], -1).detach().cpu().numpy()
+    video = torch.cat([*observation_hats, observation_gt], -1)
 
+    n_samples = len(video)
+    for i in range(n_samples):
+        name = f"{namespace}/{prefix}_{i + indent}" + (
+            f"_{postfix[i]}" if i < len(postfix) else ""
+        )
+        image_grid = make_grid(video[i], nrow=1, normalize=True, value_range=(0,1))
+        image_grid = image_grid.clamp(0, 1).mul(255).permute(1,2,0).to('cpu', torch.uint8).numpy()
+        logger.log(
+            {
+                name: wandb.Image(image_grid),
+                "trainer/global_step": step,
+            }
+        )
+
+
+    video = video.detach().cpu().numpy()
     # reshape to original shape
     if n_frames is not None:
         video = rearrange(
@@ -122,7 +139,7 @@ def log_video(
         caption = captions[i] if i < len(captions) else None
         logger.log(
             {
-                name: wandb.Video(video[i], fps=24, caption=caption),
+                name: wandb.Video(video[i], fps=5, caption=caption, format="gif"),
                 "trainer/global_step": step,
             }
         )

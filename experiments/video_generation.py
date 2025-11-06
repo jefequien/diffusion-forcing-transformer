@@ -29,6 +29,8 @@ class VideoGenerationExperiment(BaseLightningExperiment):
         realestate10k_ood=RealEstate10KOODAdvancedVideoDataset,
         realestate10k_mini=RealEstate10KMiniAdvancedVideoDataset,
         kinetics_600=Kinetics600AdvancedVideoDataset,
+        # GVS datasets
+        staircase_circuit=RealEstate10KAdvancedVideoDataset,
     )
 
     data_module_cls = _data_module_cls

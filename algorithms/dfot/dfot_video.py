@@ -518,7 +518,7 @@ class DFoTVideo(BasePytorchAlgo):
         )
 
         # 1. Predict the keyframes
-        xs_pred_key, *_ = self._predict_sequence(
+        xs_pred_key, *_ = self._predict_sequence_with_stitching(
             xs_pred[:, : self.n_context_tokens],
             length=len(keyframe_indices),
             conditions=key_conditions,
@@ -1076,6 +1076,135 @@ class DFoTVideo(BasePytorchAlgo):
             )
             xs_pred = torch.cat([xs_pred, new_pred[:, -h:]], 1)
             curr_token = xs_pred.shape[1]
+        pbar.close()
+        return xs_pred, record
+
+    def _predict_sequence_with_stitching(
+        self,
+        context: torch.Tensor,
+        length: Optional[int] = None,
+        conditions: Optional[torch.Tensor] = None,
+        guidance_fn: Optional[Callable] = None,
+        reconstruction_guidance: float = 0.0,
+        history_guidance: Optional[HistoryGuidance] = None,
+        sliding_context_len: Optional[int] = None,
+        return_all: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Predict a sequence given context tokens at the beginning with Generative View Stitching.
+        Args
+        ----
+        context: torch.Tensor, Shape (batch_size, init_context_len, *self.x_shape)
+            Initial context tokens to condition on
+        length: Optional[int]
+            Desired number of tokens in sampled sequence.
+            If None, fall back to to self.max_tokens, and
+            If bigger than self.max_tokens, sliding window sampling will be used.
+        conditions: Optional[torch.Tensor], Shape (batch_size, conditions_len, ...)
+            Unprocessed external conditions for sampling, e.g. action or text, optional
+        guidance_fn: Optional[Callable]
+            Guidance function for sampling
+        reconstruction_guidance: float
+            Scale of reconstruction guidance (from Video Diffusion Models Ho. et al.)
+        history_guidance: Optional[HistoryGuidance]
+            History guidance object that handles compositional generation
+        sliding_context_len: Optional[int]
+            Max context length when using sliding window. -1 to use max_tokens - 1.
+            Has no influence when length <= self.max_tokens as no sliding window is needed.
+        return_all: bool
+            Whether to return all steps of the sampling process.
+
+        Returns
+        -------
+        xs_pred: torch.Tensor, Shape (batch_size, length, *self.x_shape)
+            Predicted sequence with both context and generated tokens
+        record: Optional[torch.Tensor], Shape (num_steps, batch_size, length, *self.x_shape)
+            Record of all steps of the sampling process
+        """
+        print("Predicting sequence with Generative View Stitching!!!!!!")
+        if length is None:
+            length = self.max_tokens
+        if sliding_context_len is None:
+            if self.max_tokens < length:
+                raise ValueError(
+                    "when length > max_tokens, sliding_context_len must be specified."
+                )
+            else:
+                sliding_context_len = self.max_tokens - 1
+        if sliding_context_len == -1:
+            sliding_context_len = self.max_tokens - 1
+
+        batch_size, gt_len, *_ = context.shape
+
+        if sliding_context_len < gt_len:
+            raise ValueError(
+                "sliding_context_len is expected to be >= length of initial context,"
+                f"got {sliding_context_len}. If you are trying to use max context, "
+                "consider specifying sliding_context_len=-1."
+            )
+
+        chunk_size = self.chunk_size if self.use_causal_mask else self.max_tokens
+
+        curr_token = gt_len
+        xs_pred = torch.zeros((batch_size, length, *self.x_shape), device=self.device)
+        xs_pred[:, :gt_len, ...] = context
+        x_shape = self.x_shape
+        record = None
+        pbar = tqdm(
+            total=self.sampling_timesteps
+            * (
+                1
+                + (length - sliding_context_len - 1)
+                // (self.max_tokens - sliding_context_len)
+            ),
+            initial=0,
+            desc="Predicting with DFoT Stitching",
+            leave=False,
+        )
+        while curr_token < length:
+            if record is not None:
+                raise ValueError("return_all is not supported if using sliding window.")
+            # actual context depends on whether it's during sliding window or not
+            # corner case at the beginning
+            c = min(sliding_context_len, curr_token)
+            # try biggest prediction chunk size
+            h = min(length - curr_token, self.max_tokens - c)
+            # chunk_size caps how many future tokens are diffused at once to save compute for causal model
+            h = min(h, chunk_size) if chunk_size > 0 else h
+            l = c + h
+            print("x_pred.shape:", xs_pred.shape, "curr_token:", curr_token, "c:", c, "h:", h, "l:", l)
+            pad = torch.zeros((batch_size, h, *x_shape))
+            # context is last c tokens out of the sequence of generated/gt tokens
+            # pad to length that's required by _sample_sequence
+            context = torch.cat([xs_pred[:, curr_token-c:curr_token, ...], pad.to(self.device)], 1)
+            # calculate number of model generated tokens (not GT context tokens)
+            generated_len = curr_token - max(curr_token - c, gt_len)
+            # make context mask
+            context_mask = torch.ones((batch_size, c), dtype=torch.long)
+            if generated_len > 0:
+                context_mask[:, -generated_len:] = 2
+            pad = torch.zeros((batch_size, h), dtype=torch.long)
+            context_mask = torch.cat([context_mask, pad.long()], 1).to(context.device)
+
+            cond_len = l if self.use_causal_mask else self.max_tokens
+            cond_slice = None
+            if conditions is not None:
+                cond_slice = conditions[:, curr_token - c : curr_token - c + cond_len]
+
+            new_pred, record = self._sample_sequence(
+                batch_size,
+                length=l,
+                context=context,
+                context_mask=context_mask,
+                conditions=cond_slice,
+                guidance_fn=guidance_fn,
+                reconstruction_guidance=reconstruction_guidance,
+                history_guidance=history_guidance,
+                return_all=return_all,
+                pbar=pbar,
+            )
+            xs_pred[:, curr_token:curr_token+h, ...] = new_pred[:, -h:]
+            curr_token += h
         pbar.close()
         return xs_pred, record
 
