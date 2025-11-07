@@ -94,7 +94,7 @@ def log_video(
             imageio.mimwrite(
                 (raw_dir / f"{i + indent}") / "gen_preview.mp4",
                 frames,
-                fps=20,
+                fps=3,
                 macro_block_size=None,
             )
 

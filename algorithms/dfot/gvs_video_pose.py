@@ -305,29 +305,47 @@ class GVSVideoPose(DFoTVideoPose):
             xs_pred_prev = xs_pred.clone()
             
             # Shuffle
-            print("xs_pred.shape", xs_pred.shape)
-            print("conditions.shape", conditions.shape)
-            print("context_mask_chunk_triplets.shape", context_mask_chunk_triplets.shape)
-            print("from_noise_levels_chunk_triplets.shape", from_noise_levels_chunk_triplets.shape)
-            print("to_noise_levels_chunk_triplets.shape", to_noise_levels_chunk_triplets.shape)
-            print("from_noise_levels_chunk_triplets", from_noise_levels_chunk_triplets)
-            print("to_noise_levels_chunk_triplets", to_noise_levels_chunk_triplets)
-            # shuffle_indices = torch.randperm(xs_pred.shape[1]).to(self.device)
-            s = [4, 2, 1][(m % 3)]
-            offsets = repeat(torch.arange(4, device=self.device) % s, "s -> s c", c=8).flatten()
-            x_indices = torch.arange(xs_pred.shape[1], device=self.device)
+            # print("xs_pred.shape", xs_pred.shape)
+            # print("conditions.shape", conditions.shape)
+            # print("context_mask_chunk_triplets.shape", context_mask_chunk_triplets.shape)
+            # print("from_noise_levels_chunk_triplets.shape", from_noise_levels_chunk_triplets.shape)
+            # print("to_noise_levels_chunk_triplets.shape", to_noise_levels_chunk_triplets.shape)
+            # print("from_noise_levels_chunk_triplets", from_noise_levels_chunk_triplets)
+            # print("to_noise_levels_chunk_triplets", to_noise_levels_chunk_triplets)
+            w = 7
+            num_chunks = (xs_pred.shape[1] - r) // w
+            if num_chunks == 8:
+                strides = [8, 4, 2, 1]
+            elif num_chunks == 4:
+                strides = [4, 2, 1]
+            elif num_chunks == 3:
+                strides = [3, 1]
+            elif num_chunks == 2:
+                strides = [2, 1]
+            elif num_chunks == 1:
+                strides = [1]
+            else:
+                raise ValueError(f"num_chunks {num_chunks} not supported")
+            s = strides[(m % len(strides))]
+            print("r", r, "s", s, "w", w, "num_chunks", num_chunks)
+            x_indices = torch.arange(xs_pred.shape[1] - r, device=self.device)
+            offsets = repeat(torch.arange(num_chunks, device=self.device) % s, "s -> s w", w=w).flatten()
             shuffle_indices = x_indices * s + offsets
-            shuffle_indices = (x_indices - x_indices % (s * 8)) + shuffle_indices % (s * 8)
-            print(s, shuffle_indices)
-            assert shuffle_indices.unique().shape[0] == xs_pred.shape[1], "shuffle_indices must be unique"
+            shuffle_indices = (x_indices - x_indices % (s * w)) + shuffle_indices % (s * w)
+            shuffle_indices = rearrange(shuffle_indices, "(n w) -> n w", w=w)
+            shuffle_indices = torch.cat([torch.arange(r, device=self.device).unsqueeze(1), shuffle_indices + r], dim=1)
+            # print(shuffle_indices)
+            shuffle_indices = shuffle_indices.flatten()
+            # shuffle_indices = torch.randperm(xs_pred.shape[1]).to(self.device)
+            assert shuffle_indices.unique().shape[0] == target_length, "shuffle_indices must be unique"
             xs_pred = xs_pred[:, shuffle_indices]
             conditions = conditions[:, shuffle_indices]
             context_mask_chunk_triplets = context_mask_chunk_triplets[:,:,shuffle_indices]
             from_noise_levels_chunk_triplets = from_noise_levels_chunk_triplets[:, shuffle_indices]
             to_noise_levels_chunk_triplets = to_noise_levels_chunk_triplets[:, shuffle_indices]
-            print("cm1", context_mask_chunk_triplets)
-            print("fr1", from_noise_levels_chunk_triplets)
-            print("to1", to_noise_levels_chunk_triplets)
+            # print("cm1", context_mask_chunk_triplets)
+            # print("fr1", from_noise_levels_chunk_triplets)
+            # print("to1", to_noise_levels_chunk_triplets)
 
             # extract xs_pred_chunk_triplets from xs_pred
             # shape = (B, num_windows*self.max_tokens, self.x_shape)
