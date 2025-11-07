@@ -327,7 +327,8 @@ class GVSVideoPose(DFoTVideoPose):
             else:
                 raise ValueError(f"num_chunks {num_chunks} not supported")
             s = strides[(m % len(strides))]
-            print("r", r, "s", s, "w", w, "num_chunks", num_chunks)
+            # print("r", r, "s", s, "w", w, "num_chunks", num_chunks)
+            
             x_indices = torch.arange(xs_pred.shape[1] - r, device=self.device)
             offsets = repeat(torch.arange(num_chunks, device=self.device) % s, "s -> s w", w=w).flatten()
             shuffle_indices = x_indices * s + offsets

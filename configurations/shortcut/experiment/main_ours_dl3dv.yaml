@@ -6,6 +6,8 @@ experiment:
     batch_size: 1
 
 dataset:
+  # frame_skip: 5
+  # n_frames: 22
   frame_skip: 7
   n_frames: 15
   num_eval_videos: null
@@ -14,4 +16,5 @@ dataset:
 load: epoch_61-step_732274.ckpt
 algorithm:
   logging:
+    # raw_dir: "outputs/raw_dir/frame_skip_5-n_frames_22"
     raw_dir: "outputs/raw_dir/frame_skip_7-n_frames_15"

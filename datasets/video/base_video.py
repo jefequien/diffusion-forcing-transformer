@@ -371,12 +371,20 @@ class BaseAdvancedVideoDataset(BaseVideoDataset):
         Compute cumulative sizes for the dataset and update self.cumulative_sizes
         Shuffle the dataset with a fixed seed
         """
-        num_clips = torch.as_tensor(
-            [
-                max(self.video_length(video_metadata) - self.n_frames + 1, 1)
-                for video_metadata in self.metadata
-            ]
-        )
+        if self.split == "training":
+            num_clips = torch.as_tensor(
+                [
+                    max(self.video_length(video_metadata) - self.n_frames + 1, 1)
+                    for video_metadata in self.metadata
+                ]
+            )
+        else:
+            num_clips = torch.as_tensor(
+                [
+                    1 for video_metadata in self.metadata
+                ]
+            )
+
         self.cumulative_sizes = num_clips.cumsum(0).tolist()
         self.idx_remap = self._build_idx_remap()
 
@@ -444,7 +452,7 @@ class BaseAdvancedVideoDataset(BaseVideoDataset):
             # shuffle but keep the same order for each epoch, so validation sample is diverse yet deterministic
             idx_remap = list(range(self.__len__()))
             random.seed(0)
-            random.shuffle(idx_remap)
+            # random.shuffle(idx_remap)
             return idx_remap
 
     def exclude_short_videos(
