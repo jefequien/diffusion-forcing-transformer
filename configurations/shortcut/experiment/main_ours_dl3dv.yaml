@@ -7,7 +7,7 @@ experiment:
 
 dataset:
   frame_skip: 5
-  n_frames: 57
+  n_frames: 29
   num_eval_videos: 40
   context_length: 1
 

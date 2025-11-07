@@ -29,13 +29,12 @@ class GVSVideoPose(DFoTVideoPose):
         target_length = xs.shape[1]
         chunk_sizes = self.cfg.tasks.prediction.chunk_sizes
 
+        # r = 1
         # Repeat ground truth
         r = (xs.shape[1] - 1) // (chunk_sizes[1] - 1)
         xs = torch.cat([repeat(xs[:, 0], "b ... -> b r ...", r=r), xs[:, 1:]], dim=1)
         conditions = torch.cat([repeat(conditions[:, 0], "b ... -> b r ...", r=r), conditions[:, 1:]], dim=1)
         target_length = xs.shape[1]
-        print("xs.shape", xs.shape)
-        print("conditions.shape", conditions.shape)
 
         assert self.max_tokens == sum(
             chunk_sizes
@@ -313,7 +312,14 @@ class GVSVideoPose(DFoTVideoPose):
             print("to_noise_levels_chunk_triplets.shape", to_noise_levels_chunk_triplets.shape)
             print("from_noise_levels_chunk_triplets", from_noise_levels_chunk_triplets)
             print("to_noise_levels_chunk_triplets", to_noise_levels_chunk_triplets)
-            shuffle_indices = torch.randperm(xs_pred.shape[1]).to(self.device)
+            # shuffle_indices = torch.randperm(xs_pred.shape[1]).to(self.device)
+            s = [4, 2, 1][(m % 3)]
+            offsets = repeat(torch.arange(4, device=self.device) % s, "s -> s c", c=8).flatten()
+            x_indices = torch.arange(xs_pred.shape[1], device=self.device)
+            shuffle_indices = x_indices * s + offsets
+            shuffle_indices = (x_indices - x_indices % (s * 8)) + shuffle_indices % (s * 8)
+            print(s, shuffle_indices)
+            assert shuffle_indices.unique().shape[0] == xs_pred.shape[1], "shuffle_indices must be unique"
             xs_pred = xs_pred[:, shuffle_indices]
             conditions = conditions[:, shuffle_indices]
             context_mask_chunk_triplets = context_mask_chunk_triplets[:,:,shuffle_indices]
