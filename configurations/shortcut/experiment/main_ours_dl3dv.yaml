@@ -1,0 +1,14 @@
+name: main_ours_dl3dv
+
+experiment:
+  tasks: [validation]
+  validation:
+    batch_size: 1
+
+dataset:
+  frame_skip: 5
+  n_frames: 57
+  num_eval_videos: 40
+  context_length: 1
+
+load: epoch_61-step_732274.ckpt

@@ -11,7 +11,7 @@ debug: false # global debug flag will be passed into configuration of experiment
 wandb:
   entity: jefequien # wandb account name / organization name [fixme]
   project: gvs # wandb project name; if not provided, defaults to root folder name [fixme]
-  mode: online # set wandb logging to online, offline or dryrun
+  mode: offline # set wandb logging to online, offline or dryrun
 
 resume: null # wandb run id to resume logging and loading checkpoint from
 load: pretrained:DFoT_RE10K.ckpt

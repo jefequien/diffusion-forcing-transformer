@@ -504,6 +504,7 @@ class DFoTVideo(BasePytorchAlgo):
         self, batch, batch_idx, namespace="validation"
     ) -> Optional[Dict[str, Tensor]]:
         xs, conditions, *_, gt_videos = batch
+
         all_videos: Dict[str, Tensor] = {"gt": xs}
         # all_videos["conditions"] = conditions
 
@@ -530,6 +531,7 @@ class DFoTVideo(BasePytorchAlgo):
             all_videos["prediction"][:, : self.n_context_frames] = all_videos["gt"][
                 :, : self.n_context_frames
             ]
+
         return all_videos
 
     def _predict_videos(

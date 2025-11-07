@@ -4,6 +4,7 @@ from datasets.video import (
     RealEstate10KAdvancedVideoDataset,
     RealEstate10KMiniAdvancedVideoDataset,
     RealEstate10KOODAdvancedVideoDataset,
+    DL3DVAdvancedVideoDataset,
 )
 from algorithms.dfot import (
     DFoTVideo,
@@ -42,6 +43,7 @@ class VideoGenerationExperiment(BaseLightningExperiment):
         realestate10k_ood=RealEstate10KOODAdvancedVideoDataset,
         realestate10k_mini=RealEstate10KMiniAdvancedVideoDataset,
         kinetics_600=Kinetics600AdvancedVideoDataset,
+        dl3dv=DL3DVAdvancedVideoDataset,
         # GVS datasets
         straight_line=RealEstate10KAdvancedVideoDataset,
         stairs=RealEstate10KAdvancedVideoDataset,
