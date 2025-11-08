@@ -29,8 +29,10 @@ class GVSVideoPose(DFoTVideoPose):
         target_length = xs.shape[1]
         chunk_sizes = self.cfg.tasks.prediction.chunk_sizes
 
-        # r = 1
+        # w = 8
+        # r = None
         # Repeat ground truth
+        w = 7
         r = (xs.shape[1] - 1) // (chunk_sizes[1] - 1)
         xs = torch.cat([repeat(xs[:, 0], "b ... -> b r ...", r=r), xs[:, 1:]], dim=1)
         conditions = torch.cat([repeat(conditions[:, 0], "b ... -> b r ...", r=r), conditions[:, 1:]], dim=1)
@@ -55,9 +57,14 @@ class GVSVideoPose(DFoTVideoPose):
             generator=self.generator,  # seed initial noise
         )
         xs_pred = torch.clamp(xs_pred, -self.clip_noise, self.clip_noise)
-        xs_pred[:, chunk_sizes[0] : chunk_sizes[0] + self.n_context_tokens * r] = xs[
-            :, : self.n_context_tokens * r
-        ].clone()  # for the first n_context_tokens, we use ground truth frames as context and for the remaining frames, we initialize with Gaussian noise
+        if r is None:
+            xs_pred[:, chunk_sizes[0] : chunk_sizes[0] + self.n_context_tokens] = xs[
+                :, : self.n_context_tokens
+            ].clone()  # for the first n_context_tokens, we use ground truth frames as context and for the remaining frames, we initialize with Gaussian noise
+        else:
+            xs_pred[:, chunk_sizes[0] : chunk_sizes[0] + self.n_context_tokens * r] = xs[
+                :, : self.n_context_tokens * r
+            ].clone()  # for the first n_context_tokens, we use ground truth frames as context and for the remaining frames, we initialize with Gaussian noise
 
         # extend conditions
         # conditions = torch.cat(
@@ -76,7 +83,10 @@ class GVSVideoPose(DFoTVideoPose):
         # 1: ground-truth context
         # 2: fully denoised
         context_mask = torch.zeros(xs_pred.shape[:2], device=self.device)
-        context_mask[:, chunk_sizes[0] : chunk_sizes[0] + self.n_context_tokens * r] = 1
+        if r is None:
+            context_mask[:, chunk_sizes[0] : chunk_sizes[0] + self.n_context_tokens] = 1
+        else:
+            context_mask[:, chunk_sizes[0] : chunk_sizes[0] + self.n_context_tokens * r] = 1
 
         # left-most padding chunk and right-most padding chunk are marked by -1
         # context_mask[:, : chunk_sizes[0]] = -1
@@ -265,6 +275,32 @@ class GVSVideoPose(DFoTVideoPose):
         record_xs_pred = []
         record_x0s_pred = []
 
+        # Compute shuffle indices for each stride
+        # num_chunks = (xs_pred.shape[1] - r) // w
+        # if num_chunks == 8:
+        #     strides = [8, 4, 2, 1]
+        # elif num_chunks == 4:
+        #     strides = [4, 2, 1]
+        # elif num_chunks == 3:
+        #     strides = [3, 1]
+        # elif num_chunks == 2:
+        #     strides = [2, 1]
+        # elif num_chunks == 1:
+        #     strides = [1]
+        # else:
+        #     raise ValueError(f"num_chunks {num_chunks} not supported")
+        # shuffle_indices_list = []
+        # for s in strides:
+        #     x_indices = torch.arange(xs_pred.shape[1] - r, device=self.device)
+        #     offsets = repeat(torch.arange(num_chunks, device=self.device) % s, "s -> s w", w=w).flatten()
+        #     shuffle_indices = x_indices * s + offsets
+        #     shuffle_indices = (x_indices - x_indices % (s * w)) + shuffle_indices % (s * w)
+        #     shuffle_indices = rearrange(shuffle_indices, "(n w) -> n w", w=w)
+        #     shuffle_indices = torch.cat([torch.arange(r, device=self.device).unsqueeze(1), shuffle_indices + r], dim=1)
+        #     shuffle_indices = shuffle_indices.flatten()
+        #     shuffle_indices_list.append(shuffle_indices)
+        # print("shuffle_indices_list: ", shuffle_indices_list)
+
         # iterate over denoising steps
         for m in range(num_denoising_steps - 1):
             indices = indices_to_cycle_through_per_denoising_step[:, m]
@@ -298,13 +334,26 @@ class GVSVideoPose(DFoTVideoPose):
             context_mask_chunk_triplets = context_mask[:, indices]
 
             # 5) coordinate the noise levels for all chunks
-            from_noise_levels_chunk_triplets = scheduling_matrix_chunk_triplets[m]
-            to_noise_levels_chunk_triplets = scheduling_matrix_chunk_triplets[m + 1]
+            from_noise_levels_chunk_triplets_input = scheduling_matrix_chunk_triplets[m]
+            to_noise_levels_chunk_triplets_input = scheduling_matrix_chunk_triplets[m + 1]
 
             # create a backup with all context tokens unmodified
             xs_pred_prev = xs_pred.clone()
             
             # Shuffle
+            # shuffle_indices = shuffle_indices_list[(m % len(strides))]
+            if r is None:
+                shuffle_indices = torch.randperm(xs_pred.shape[1]).to(self.device)
+            else:
+                shuffle_indices = torch.randperm(xs_pred.shape[1] - r).to(self.device)
+            shuffle_indices = rearrange(shuffle_indices, "(n w) -> n w", w=w)
+            shuffle_indices = torch.sort(shuffle_indices, dim=1)[0]
+            if r is not None:
+                shuffle_indices = torch.cat([torch.arange(r, device=self.device).unsqueeze(1), shuffle_indices + r], dim=1)
+            shuffle_indices = shuffle_indices.flatten()
+            print("shuffle_indices: ", shuffle_indices)
+            # shuffle_indices = torch.randperm(xs_pred.shape[1]).to(self.device)
+            assert shuffle_indices.unique().shape[0] == target_length, "shuffle_indices must be unique"
             # print("xs_pred.shape", xs_pred.shape)
             # print("conditions.shape", conditions.shape)
             # print("context_mask_chunk_triplets.shape", context_mask_chunk_triplets.shape)
@@ -312,41 +361,11 @@ class GVSVideoPose(DFoTVideoPose):
             # print("to_noise_levels_chunk_triplets.shape", to_noise_levels_chunk_triplets.shape)
             # print("from_noise_levels_chunk_triplets", from_noise_levels_chunk_triplets)
             # print("to_noise_levels_chunk_triplets", to_noise_levels_chunk_triplets)
-            w = 7
-            num_chunks = (xs_pred.shape[1] - r) // w
-            if num_chunks == 8:
-                strides = [8, 4, 2, 1]
-            elif num_chunks == 4:
-                strides = [4, 2, 1]
-            elif num_chunks == 3:
-                strides = [3, 1]
-            elif num_chunks == 2:
-                strides = [2, 1]
-            elif num_chunks == 1:
-                strides = [1]
-            else:
-                raise ValueError(f"num_chunks {num_chunks} not supported")
-            s = strides[(m % len(strides))]
-            # print("r", r, "s", s, "w", w, "num_chunks", num_chunks)
-            
-            x_indices = torch.arange(xs_pred.shape[1] - r, device=self.device)
-            offsets = repeat(torch.arange(num_chunks, device=self.device) % s, "s -> s w", w=w).flatten()
-            shuffle_indices = x_indices * s + offsets
-            shuffle_indices = (x_indices - x_indices % (s * w)) + shuffle_indices % (s * w)
-            shuffle_indices = rearrange(shuffle_indices, "(n w) -> n w", w=w)
-            shuffle_indices = torch.cat([torch.arange(r, device=self.device).unsqueeze(1), shuffle_indices + r], dim=1)
-            # print(shuffle_indices)
-            shuffle_indices = shuffle_indices.flatten()
-            # shuffle_indices = torch.randperm(xs_pred.shape[1]).to(self.device)
-            assert shuffle_indices.unique().shape[0] == target_length, "shuffle_indices must be unique"
             xs_pred = xs_pred[:, shuffle_indices]
             conditions = conditions[:, shuffle_indices]
             context_mask_chunk_triplets = context_mask_chunk_triplets[:,:,shuffle_indices]
-            from_noise_levels_chunk_triplets = from_noise_levels_chunk_triplets[:, shuffle_indices]
-            to_noise_levels_chunk_triplets = to_noise_levels_chunk_triplets[:, shuffle_indices]
-            # print("cm1", context_mask_chunk_triplets)
-            # print("fr1", from_noise_levels_chunk_triplets)
-            # print("to1", to_noise_levels_chunk_triplets)
+            from_noise_levels_chunk_triplets_input = from_noise_levels_chunk_triplets_input[:, shuffle_indices]
+            to_noise_levels_chunk_triplets_input = to_noise_levels_chunk_triplets_input[:, shuffle_indices]
 
             # extract xs_pred_chunk_triplets from xs_pred
             # shape = (B, num_windows*self.max_tokens, self.x_shape)
@@ -369,8 +388,8 @@ class GVSVideoPose(DFoTVideoPose):
                     conditions_mask_chunk_triplets,
                 ) = history_guidance_manager.prepare(
                     xs_pred_chunk_triplets,
-                    from_noise_levels_chunk_triplets,
-                    to_noise_levels_chunk_triplets,
+                    from_noise_levels_chunk_triplets_input,
+                    to_noise_levels_chunk_triplets_input,
                     replacement_fn=self.diffusion_model.q_sample,
                     replacement_only=self.is_full_sequence,
                     # generator=self.generator,
@@ -574,6 +593,9 @@ class GVSVideoPose(DFoTVideoPose):
             unshuffle_indices = torch.argsort(shuffle_indices)
             xs_pred = xs_pred[:, unshuffle_indices]
             conditions = conditions[:, unshuffle_indices]
+            context_mask_chunk_triplets = context_mask_chunk_triplets[:,:,unshuffle_indices]
+            from_noise_levels_chunk_triplets_input = from_noise_levels_chunk_triplets_input[:, unshuffle_indices]
+            to_noise_levels_chunk_triplets_input = to_noise_levels_chunk_triplets_input[:, unshuffle_indices]
 
             # only replace the tokens being generated (revert context tokens)
             xs_pred = torch.where(
@@ -635,5 +657,6 @@ class GVSVideoPose(DFoTVideoPose):
         # xs_pred = xs_pred[:, unshuffle_indices]
 
         # xs_pred = xs_pred[:, chunk_sizes[0] :]# -chunk_sizes[-1]]
-        xs_pred = xs_pred[:, r - 1:]
+        if r is not None:
+            xs_pred = xs_pred[:, r - 1:]
         return xs_pred
