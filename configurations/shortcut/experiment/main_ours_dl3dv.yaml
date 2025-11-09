@@ -7,7 +7,7 @@ experiment:
 
 dataset:
   frame_skip: 5
-  n_frames: 22
+  n_frames: 20
   # frame_skip: 7
   # n_frames: 15
   num_eval_videos: null
@@ -18,5 +18,6 @@ algorithm:
   diffusion:
     sampling_timesteps: 50
   logging:
-    raw_dir: "outputs/raw_dir/frame_skip_5-n_frames_22_shuffle_mixed"
+    # raw_dir: "outputs/raw_dir/frame_skip_5-n_frames_22_shuffle"
     # raw_dir: "outputs/raw_dir/frame_skip_7-n_frames_15_shuffle"
+    raw_dir: "outputs/raw_dir/gvs_frame_skip_5-n_frames_20_switch40"
