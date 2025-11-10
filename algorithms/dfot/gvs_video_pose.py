@@ -327,11 +327,12 @@ class GVSVideoPose(DFoTVideoPose):
 
                 # Shuffle
                 shuffle_indices = torch.randperm(xs_pred.shape[1] - num_windows).to(self.device)
-                shuffle_indices = rearrange(shuffle_indices, "(n w) -> n w", n=num_windows)
+                shuffle_indices = rearrange(shuffle_indices, "(n w) -> n w", w=7 * 2)
                 shuffle_indices = torch.sort(shuffle_indices, dim=1)[0]
+                shuffle_indices = shuffle_indices.reshape(-1, 7)
                 shuffle_indices = torch.cat([torch.arange(num_windows, device=self.device).unsqueeze(1), shuffle_indices + num_windows], dim=1)
+                print("shuffle_indices", shuffle_indices)
                 shuffle_indices = shuffle_indices.flatten()
-                # print("shuffle_indices", shuffle_indices)
                 assert shuffle_indices.unique().shape[0] == num_windows * 8, "shuffle_indices must be unique"
 
                 xs_pred = xs_pred[:, shuffle_indices]
