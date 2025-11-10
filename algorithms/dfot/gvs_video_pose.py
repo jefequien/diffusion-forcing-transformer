@@ -5,6 +5,7 @@ import torch
 from torch import Tensor
 from einops import rearrange, repeat
 from tqdm import tqdm
+import math
 from utils.logging_utils import log_video
 from .history_guidance import HistoryGuidance
 from .dfot_video_pose import DFoTVideoPose
@@ -290,7 +291,7 @@ class GVSVideoPose(DFoTVideoPose):
             xs_pred_prev = xs_pred.clone()
 
             # Slice
-            use_slice = m < 40
+            use_slice = m < self.cfg.diffusion.switch_timestep
             if use_slice:
                 # Create slice backup
                 xs_pred_backup = xs_pred.clone()
@@ -298,35 +299,31 @@ class GVSVideoPose(DFoTVideoPose):
                 num_windows_backup = num_windows
                 chunk_sizes_backup = chunk_sizes.clone()
 
-                slice_indices = torch.tensor([
-                    0,0,1,1,1,1,0,0,
-                    0,0,1,1,1,1,0,0,
-                    0,0,1,1,1,1,0,0,
-                    0,0,1,1,1,1,0,0,
-                    0,0,1,1,1,1,0,0,
-                ], device=self.device, dtype=torch.bool)
+                slice_indices = torch.tensor([0,0,1,1,1,1,0,0] * num_windows, device=self.device, dtype=torch.bool)
                 xs_pred = xs_pred[:, 2:-2]
                 conditions = conditions[:, 2:-2]
                 context_mask_chunk_triplets = context_mask_chunk_triplets[:,slice_indices]
                 from_noise_levels_chunk_triplets_input = from_noise_levels_chunk_triplets_input[:, slice_indices]
                 to_noise_levels_chunk_triplets_input = to_noise_levels_chunk_triplets_input[:, slice_indices]
                 
-                num_windows = 3
+                num_windows = math.ceil((target_length - 1) / 7)
                 chunk_sizes = torch.tensor([0, 8, 0], device=self.device)
                 indices = torch.arange(num_windows * 8, device=self.device).unsqueeze(0)
 
                 r0 = num_windows - 1
-                r1 = 2
+                r1 = target_length + r0
+                r1 = -r1 % 8 # (8 - (r1 % 8)) % 8
                 xs_pred = torch.cat([repeat(xs_pred[:, 0], "b ... -> b r ...", r=r0), xs_pred], dim=1)
                 conditions = torch.cat([repeat(conditions[:, 0], "b ... -> b r ...", r=r0), conditions], dim=1)
                 context_mask_chunk_triplets = torch.cat([repeat(context_mask_chunk_triplets[:, 0], "b ... -> b r ...", r=r0), context_mask_chunk_triplets], dim=1)
                 from_noise_levels_chunk_triplets_input = torch.cat([repeat(from_noise_levels_chunk_triplets_input[:, 0], "b ... -> b r ...", r=r0), from_noise_levels_chunk_triplets_input], dim=1)
                 to_noise_levels_chunk_triplets_input = torch.cat([repeat(to_noise_levels_chunk_triplets_input[:, 0], "b ... -> b r ...", r=r0), to_noise_levels_chunk_triplets_input], dim=1)
-                xs_pred = torch.cat([xs_pred, repeat(xs_pred[:, -1], "b ... -> b r ...", r=r1)], dim=1)
-                conditions = torch.cat([conditions, repeat(conditions[:, -1], "b ... -> b r ...", r=r1)], dim=1)
-                context_mask_chunk_triplets = torch.cat([context_mask_chunk_triplets, repeat(context_mask_chunk_triplets[:, -1], "b ... -> b r ...", r=r1)], dim=1)
-                from_noise_levels_chunk_triplets_input = torch.cat([from_noise_levels_chunk_triplets_input, repeat(from_noise_levels_chunk_triplets_input[:, -1], "b ... -> b r ...", r=r1)], dim=1)
-                to_noise_levels_chunk_triplets_input = torch.cat([to_noise_levels_chunk_triplets_input, repeat(to_noise_levels_chunk_triplets_input[:, -1], "b ... -> b r ...", r=r1)], dim=1)
+                if r1 != 0:
+                    xs_pred = torch.cat([xs_pred, repeat(xs_pred[:, -1], "b ... -> b r ...", r=r1)], dim=1)
+                    conditions = torch.cat([conditions, repeat(conditions[:, -1], "b ... -> b r ...", r=r1)], dim=1)
+                    context_mask_chunk_triplets = torch.cat([context_mask_chunk_triplets, repeat(context_mask_chunk_triplets[:, -1], "b ... -> b r ...", r=r1)], dim=1)
+                    from_noise_levels_chunk_triplets_input = torch.cat([from_noise_levels_chunk_triplets_input, repeat(from_noise_levels_chunk_triplets_input[:, -1], "b ... -> b r ...", r=r1)], dim=1)
+                    to_noise_levels_chunk_triplets_input = torch.cat([to_noise_levels_chunk_triplets_input, repeat(to_noise_levels_chunk_triplets_input[:, -1], "b ... -> b r ...", r=r1)], dim=1)
 
                 # Shuffle
                 shuffle_indices = torch.randperm(xs_pred.shape[1] - num_windows).to(self.device)
@@ -334,7 +331,7 @@ class GVSVideoPose(DFoTVideoPose):
                 shuffle_indices = torch.sort(shuffle_indices, dim=1)[0]
                 shuffle_indices = torch.cat([torch.arange(num_windows, device=self.device).unsqueeze(1), shuffle_indices + num_windows], dim=1)
                 shuffle_indices = shuffle_indices.flatten()
-                print("shuffle_indices", shuffle_indices)
+                # print("shuffle_indices", shuffle_indices)
                 assert shuffle_indices.unique().shape[0] == num_windows * 8, "shuffle_indices must be unique"
 
                 xs_pred = xs_pred[:, shuffle_indices]
@@ -343,17 +340,17 @@ class GVSVideoPose(DFoTVideoPose):
                 from_noise_levels_chunk_triplets_input = from_noise_levels_chunk_triplets_input[:, shuffle_indices]
                 to_noise_levels_chunk_triplets_input = to_noise_levels_chunk_triplets_input[:, shuffle_indices]
                 
-            print("xs_pred.shape", xs_pred.shape)
-            print("conditions.shape", conditions.shape)
-            print("indices.shape", indices.shape)
-            print("chunk_sizes", chunk_sizes)
-            print("context_mask_chunk_triplets.shape", context_mask_chunk_triplets.shape)
-            print("from_noise_levels_chunk_triplets_input.shape", from_noise_levels_chunk_triplets_input.shape)
-            print("to_noise_levels_chunk_triplets_input.shape", to_noise_levels_chunk_triplets_input.shape)
-            print("indices", indices)
-            print("context_mask_chunk_triplets", context_mask_chunk_triplets)
-            print("from_noise_levels_chunk_triplets_input", from_noise_levels_chunk_triplets_input)
-            print("to_noise_levels_chunk_triplets_input", to_noise_levels_chunk_triplets_input)
+            # print("xs_pred.shape", xs_pred.shape)
+            # print("conditions.shape", conditions.shape)
+            # print("indices.shape", indices.shape)
+            # print("chunk_sizes", chunk_sizes)
+            # print("context_mask_chunk_triplets.shape", context_mask_chunk_triplets.shape)
+            # print("from_noise_levels_chunk_triplets_input.shape", from_noise_levels_chunk_triplets_input.shape)
+            # print("to_noise_levels_chunk_triplets_input.shape", to_noise_levels_chunk_triplets_input.shape)
+            # print("indices", indices)
+            # print("context_mask_chunk_triplets", context_mask_chunk_triplets)
+            # print("from_noise_levels_chunk_triplets_input", from_noise_levels_chunk_triplets_input)
+            # print("to_noise_levels_chunk_triplets_input", to_noise_levels_chunk_triplets_input)
 
             # extract xs_pred_chunk_triplets from xs_pred
             # shape = (B, num_windows*self.max_tokens, self.x_shape)
@@ -593,9 +590,12 @@ class GVSVideoPose(DFoTVideoPose):
                 unshuffle_indices = torch.argsort(shuffle_indices)
                 xs_pred = xs_pred[:, unshuffle_indices]
                 conditions = conditions[:, unshuffle_indices]
-
-                xs_pred = xs_pred[:, r0:-r1]
-                conditions = conditions[:, r0:-r1]
+                if r1 == 0:
+                    xs_pred = xs_pred[:, r0:]
+                    conditions = conditions[:, r0:]
+                else:
+                    xs_pred = xs_pred[:, r0:-r1]
+                    conditions = conditions[:, r0:-r1]
 
                 xs_pred_backup[:, 2:-2] = xs_pred
                 conditions_backup[:, 2:-2] = conditions

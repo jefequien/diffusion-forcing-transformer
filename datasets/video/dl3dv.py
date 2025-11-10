@@ -47,8 +47,8 @@ class DL3DVBaseVideoDataset(BaseVideoDataset):
     def build_metadata(self, split: SPLIT) -> None:
         data_patterns = {
             "training": ["1K", "2K", "3K", "4K", "5K", "6K", "7K", "8K", "10K"], 
-            "validation": ["9K"],
-            "test": ["9K"],
+            "validation": ["../dl3dv-evaluation-frames256"],
+            "test": ["../dl3dv-evaluation-frames256"],
         }
         default_fps = 5.0
 

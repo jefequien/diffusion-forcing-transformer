@@ -6,6 +6,8 @@ experiment:
     batch_size: 1
 
 dataset:
+  # frame_skip: 5
+  # n_frames: 20
   frame_skip: 5
   n_frames: 20
   # frame_skip: 7
@@ -17,7 +19,8 @@ load: epoch_61-step_732274.ckpt
 algorithm:
   diffusion:
     sampling_timesteps: 50
+    switch_timestep: 20
   logging:
     # raw_dir: "outputs/raw_dir/frame_skip_5-n_frames_22_shuffle"
     # raw_dir: "outputs/raw_dir/frame_skip_7-n_frames_15_shuffle"
-    raw_dir: "outputs/raw_dir/gvs_frame_skip_5-n_frames_20_switch40"
+    raw_dir: "outputs/raw_dir/gvs_frame_skip_5-n_frames_20-switch_20"
