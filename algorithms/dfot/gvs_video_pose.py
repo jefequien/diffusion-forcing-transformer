@@ -327,7 +327,7 @@ class GVSVideoPose(DFoTVideoPose):
 
                 # Shuffle
                 shuffle_indices = torch.randperm(xs_pred.shape[1] - num_windows).to(self.device)
-                shuffle_indices = rearrange(shuffle_indices, "(n w) -> n w", w=7 * 2)
+                shuffle_indices = rearrange(shuffle_indices, "(n w) -> n w", w=7 * 3)
                 shuffle_indices = torch.sort(shuffle_indices, dim=1)[0]
                 shuffle_indices = shuffle_indices.reshape(-1, 7)
                 shuffle_indices = torch.cat([torch.arange(num_windows, device=self.device).unsqueeze(1), shuffle_indices + num_windows], dim=1)
